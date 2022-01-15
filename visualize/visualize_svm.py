@@ -4614,4 +4614,1657 @@ def plot_edt_distributions_box_plots_body_vs_lever(vis):
         plt.close()
         
         
-        
+
+
+def load_locaNMF_temporal(animal_id,
+                          session_name,
+                          root_dir,
+                          session_id):
+    #import
+    loca = LocaNMFClass(root_dir, animal_id, session_name)
+
+    #
+    loca.get_sessions(session_name)
+    #print ("sessions: ", loca.sessions.shape)
+    #print ("selected session: ", loca.sessions[session_id])
+
+    session = loca.sessions[session_id]
+
+    # load data
+    fname_locaNMF = os.path.join(root_dir, animal_id, 'tif_files',session,
+                                 session + '_locanmf.npz')
+
+
+    atlas, areas, names, locaNMF_temporal, locaNMF_temporal_random = load_locaNMF_data(fname_locaNMF)
+
+    return atlas, areas, names, locaNMF_temporal, locaNMF_temporal_random
+
+
+
+def load_locaNMF_data(fname_locaNMF):
+    # order locaNMF components by plot color ORDER in Fig 4A
+    ordered_names = np.array([15,0,14,1,   # retrosplenial areas
+                          13,2,
+                          12,3,
+                          11,4,
+                          10,5,
+                          9,6,
+                          8,7])[::-1]
+
+
+    # load raw data
+    try:
+        d = np.load(fname_locaNMF)
+    except:
+        print ("file missing", fname_locaNMF)
+        return None, None, None, None, None
+
+    locaNMF_temporal = d['temporal_trial']
+    locaNMF_temporal_random = d['temporal_random']
+    locaNMF_temporal = locaNMF_temporal[:,ordered_names]
+    locaNMF_temporal_random = locaNMF_temporal_random[:,ordered_names]
+    # print ("locanmf data: ", locaNMF_temporal.shape)
+
+    #
+    areas = d['areas'][ordered_names]
+    names = d['names'][ordered_names]
+    #print ("original names: ", names.shape)
+
+    #
+    atlas = np.load('/home/cat/code/widefield/locanmf/atlas_fixed_pixel.npy')
+    #print ("atlas: ",atlas.shape)
+    # print (areas)
+    # print (names)
+
+    #print ("  # of ordered_names: ", ordered_names.shape)
+    #print ("ORDERED NAMES: ", names[ordered_names])
+
+
+    return atlas, areas, names, locaNMF_temporal, locaNMF_temporal_random
+
+def get_angle_from_sinusoid(curve, index):
+    # COMPUTE PHASE ANGLE FROM AMPLITUDE AND GRADIENT OF SINUSOID
+    # Index is the loatoin of the point at which the phase is to be computed
+
+    # must normalize and recentre curve to go from -1 to +1 as a standardized sinusoid
+    curve = (curve-np.min(curve))/(np.max(curve)-np.min(curve))*2-1
+
+    angle = np.arcsin(curve[index])
+    if angle<0:
+        angle+=np.pi
+
+    #
+    curve0 = curve[index]
+    curve1 = curve[index+1]
+    if curve0<0:
+        if (curve1-curve0)>0:
+            angle = np.pi+angle
+        else:
+            angle = 2*np.pi-angle
+    else:
+        if (curve1-curve0)<=0:
+            angle = np.pi-angle
+        else:
+            angle = angle
+
+    phase = angle
+
+    return phase
+
+def fit_sin(tt, yy):
+
+    '''Fit sin to the input time sequence,
+        and return fitting parameters
+        "amp", "omega", "phase", "offset", "freq", "period" and "fitfunc"
+
+
+    '''
+
+    #
+    tt = np.array(tt)
+    yy = np.array(yy)
+    ff = np.fft.fftfreq(len(tt), (tt[1]-tt[0]))   # assume uniform spacing
+    Fyy = abs(np.fft.fft(yy))
+    guess_freq = abs(ff[np.argmax(Fyy[1:])+1])   # excluding the zero frequency "peak", which is related to offset
+    guess_amp = np.std(yy) * 2.**0.5
+    guess_offset = np.mean(yy)
+    guess = np.array([guess_amp, 2.*np.pi*guess_freq, 0., guess_offset])
+
+    def sinfunc(t, A, w, p, c):
+        return A * np.sin(w*t + p) + c
+
+    popt, pcov = scipy.optimize.curve_fit(sinfunc, tt, yy, p0=guess)
+    A, w, p, c = popt
+    f = w/(2.*np.pi)
+    fitfunc = lambda t: A * np.sin(w*t + p) + c
+
+    #
+    return {"amp": A,
+            "omega": w,
+            "phase": p,
+            "offset": c,
+            "freq": f,
+            "period": 1./f,
+            "fitfunc": fitfunc,
+            "maxcov": np.max(pcov),
+            "rawres": (guess,popt,pcov)
+           }
+
+
+
+def plot_phases(root_dir, animal_id, session_id, show_area_id, random_flag):
+
+    ''' function that fits phases to raw locanm components
+
+    '''
+
+    session_name = 'all'
+
+    #
+    areas_to_plot_phases = ['Retrosplenial area, dorsal part, layer 1 - left',
+                            'Primary somatosensory area, barrel field, layer 1 - left',
+                            'upper limb, layer 1 - left',
+                            'Primary visual area, layer 1 - left',
+                            'Primary motor area, Layer 1 - left',
+                           ]
+
+    #
+    #show_area_id = 2  # upper limb cortex
+
+    #
+    #codes = ['_Retrosplenial', '_barrel', '_limb', '_visual','_motor','']
+    clrs_local = ['magenta','brown','pink','lightblue','darkblue', 'blue']
+
+    #
+    #session_id = 21  # March 3 - IJ2 session
+
+    #
+    #random_flag = False
+
+    start = 900 - 15*30   # start at -10 sec
+    end = 900 + 0*30             # end at 0 sec
+
+    #
+    plotting=True
+
+    #
+    (atlas,
+     areas,
+     names,
+     locaNMF_temporal,
+     locaNMF_temporal_random) = load_locaNMF_temporal(animal_id,
+                                                      session_name,
+                                                      root_dir,
+                                                      session_id)
+    #
+    if atlas is None:
+        print ("session is empty ")
+        return ([[],[],[],[],[]])
+
+    plt.figure(figsize=(15,10))
+
+    # loop over areas
+    t0_phases=[]
+    for ctr_area, area_sel in enumerate(areas_to_plot_phases):
+        #
+        t0_phases.append([])
+
+        #
+        areas_selected = []
+        for k in range(len(names)):
+            if area_sel in names[k]:
+                areas_selected.append(k)
+
+        # use random data instead
+        if random_flag:
+            locaNMF_temporal = locaNMF_temporal_random
+
+        #
+        areas_selected = np.array(areas_selected)
+        locaNMF_temporal2 = locaNMF_temporal[:,areas_selected].squeeze()
+
+        #
+        missed_fit = 0
+        t = np.arange(locaNMF_temporal2.shape[1])/30-30
+        curves=[]
+
+       # print ("# trials: ", locaNMF_temporal2.shape[0])
+        for k in range(locaNMF_temporal2.shape[0]):
+            if ctr_area==show_area_id:
+                if plotting:
+                    ax1=plt.subplot(2,1,1)
+                    ax1.plot(t,locaNMF_temporal2[k],
+                         c='black',
+                         linewidth=3,
+                         alpha=.1)
+
+            # fit sinusoid to the single trial data
+            tt = t[start:end]
+            yy = locaNMF_temporal2[k][start:end]
+
+            #
+            try:
+                tt2 = np.arange(0, locaNMF_temporal2[k].shape[0],1)/30.-30
+                res = fit_sin(tt, yy)
+                curve = res["fitfunc"](tt2)
+
+                #print ("CURVE: ", curve.shape)
+                # if curve fit, extrapolate all the way to -30sec
+
+                if plotting:
+                    if ctr_area==show_area_id:
+                        ax2=plt.subplot(2,1,2)
+                        curve2 = (curve-np.min(curve))/(np.max(curve)-np.min(curve))*2-1
+                        curves.append(curve2)
+                        ax2.plot(tt2,
+                                 curve2,
+                                 linewidth=2,
+                                 #c=clrs_local[show_area_id],
+                                 c='pink',
+                                 alpha=.5
+                            )
+                        ax2.scatter(tt2[900],
+                                 curve2[900],
+                                 edgecolor='black',
+                                 c=clrs_local[show_area_id],
+                                 alpha=1
+                            )
+
+                # get peaks of curves
+                phase = get_angle_from_sinusoid(curve, 900)
+
+                #
+                t0_phases[ctr_area].append(phase)
+            except:
+                pass
+
+
+        ###############################
+        ######## PLOT MEANS ###########
+        ###############################
+        if ctr_area==show_area_id:
+            #curves=np.array(curves)
+            mean = np.mean(locaNMF_temporal2,axis=0)
+            if plotting:
+                #ax=plt.subplot(2,1,1)
+                ax1.plot(t,mean,
+                         c='black',
+                         linewidth=8,
+                         alpha=1)
+
+                #
+                ax1.plot([-30,30],[0,0],'--',c='grey')
+                ax1.set_xlim(-15,1)
+                ax1.plot([0,0],[-10,10],'--',c='grey')
+                ax1.set_ylim(-0.15,0.20)
+                ax1.set_xlabel("Time (sec)")
+                ax1.set_ylabel("DF/F")
+
+
+            # fit sinusoid to trial average
+            try:
+                tt = t[start:end]
+                curves=np.array(curves)
+                mean = np.mean(curves,axis=0)
+                tt2 = np.arange(0,mean.shape[0],1)/30.-30
+                yy = mean[start:end]
+
+                res = fit_sin(tt, yy)
+                #print( "Amplitude=%(amp)s, Angular freq.=%(omega)s, phase=%(phase)s, offset=%(offset)s, Max. Cov.=%(maxcov)s" % res )
+
+                # PLOT REAL AVERAGE NOT FIT
+
+                if plotting:
+                    mean = np.mean(curves,axis=0)
+                    #ax2=plt.subplot(2,1,2)
+                    #plt.plot(tt, yy, "-k", label="y", linewidth=2)
+                    ax2.plot(tt2, mean, linewidth=8,
+                            #c=clrs_local[show_area_id]
+                            c='pink'
+                            )
+
+                    #
+                    ax2.plot([-30,30],[0,0],'--',c='grey')
+                    ax2.plot([0,0],[-10,10],'--',c='grey')
+                    ax2.set_xlim(-15,1)
+                    #ax2.ylim(-0.15,0.15)
+                    ax2.set_ylim(-1,1)
+                    ax2.set_xlabel("Time (sec)")
+                    ax2.set_ylabel("Normalized sin fit")
+            except:
+                pass
+    return t0_phases
+
+#
+class LocaNMFClass():
+
+    def __init__(self, root_dir, animal_id, session):
+
+        #
+        self.min_trials = 10
+
+        #
+        self.root_dir = root_dir
+
+        #
+        self.animal_id = animal_id   # 'IJ1'
+
+        #
+        self.sessions = self.get_sessions(session)     # 'Mar3'
+
+        #
+        #fname_atlas = os.path.join(self.root_dir, 'yongxu/atlas_split.npy')
+        fname_atlas = '/home/cat/code/widefield/locanmf/atlas_fixed_pixel.npy'
+        self.atlas = np.load(fname_atlas)
+
+
+
+    def get_sessions(self,session_id):
+         # load ordered sessions from file
+        sessions = np.load(os.path.join(self.root_dir,
+                                        self.animal_id,
+                                        'tif_files.npy'))
+        # grab session names from saved .npy files
+        data = []
+        for k in range(len(sessions)):
+            data.append(os.path.split(sessions[k])[1].replace('.tif',''))
+        sessions = data
+
+        #
+        if session_id != 'all':
+            final_session = []
+            session_number = None
+            for k in range(len(sessions)):
+                if session_id in sessions[k]:
+                    final_session = [sessions[k]]
+                    session_number = k
+                    break
+            sessions = final_session
+
+        # fix binary string files issues; remove 'b and ' from file names
+        for k in range(len(sessions)):
+            sessions[k] = str(sessions[k]).replace("'b",'').replace("'","")
+            if sessions[k][0]=='b':
+                sessions[k] = sessions[k][1:]
+
+        sessions = np.array(sessions)
+
+        return sessions
+
+    def run_loca(self):
+
+        #################################################
+        #################################################
+        #################################################
+        # maxrank = how many max components per brain region. Set maxrank to around 4 for regular dataset.
+        maxrank = 1
+
+        # min_pixels = minimum number of pixels in Allen map for it to be considered a brain region
+        # default min_pixels = 100
+        min_pixels = 200
+
+        # loc_thresh = Localization threshold, i.e. percentage of area restricted to be inside the 'Allen boundary'
+        # default loc_thresh = 80
+        loc_thresh = 75
+
+        # r2_thresh = Fraction of variance in the data to capture with LocaNMF
+        # default r2_thresh = 0.99
+        r2_thresh = 0.96
+
+        # Do you want nonnegative temporal components? The data itself should also be nonnegative in this case.
+        # default nonnegative_temporal = False
+        nonnegative_temporal = False
+
+
+        # maxiter_hals = Number of iterations in innermost loop (HALS). Keeping this low provides a sort of regularization.
+        # default maxiter_hals = 20
+        maxiter_hals = 20
+
+        # maxiter_lambda = Number of iterations for the lambda loop. Keep this high for finding a good solution.
+        # default maxiter_lambda = 100
+        maxiter_lambda = 150
+
+        # lambda_step = Amount to multiply lambda after every lambda iteration.
+        # lambda_init = initial value of lambda. Keep this low. default lambda_init = 0.000001
+        # lambda_{i+1}=lambda_i*lambda_step. lambda_0=lambda_init. default lambda_step = 1.35
+        # lambda_step = 1.25
+        # lambda_init = 1e-4
+
+        # NEW PARAMS SUGGESTED BY YONGXU July ~20
+        lambda_step = 2.25
+        lambda_init = 1e-1
+
+        ######################################################
+        ######################################################
+        ######################################################
+        for session in self.sessions:
+
+            fname_out = os.path.join(self.root_dir,self.animal_id,'tif_files',
+                                     session,session+'_locanmf.npz')
+            if os.path.exists(fname_out)==False:
+
+                fname_locs = os.path.join(self.root_dir, self.animal_id, 'tif_files',
+                                          session, session + '_all_locs_selected.txt')
+                if os.path.exists(fname_locs)==False:
+                    print ("  no lever pulls, skipping ")
+                    continue
+
+                n_locs = np.loadtxt(fname_locs)
+                print ("")
+                print ("")
+                print (session, " has n trials: ", n_locs.shape)
+                if n_locs.shape[0]<self.min_trials:
+                    print ("  too few trials, skipping ", n_locs.shape[0])
+                    continue
+
+                ###########################################################
+                # load spatial footprints from PCA compressed data
+                fname_spatial = os.path.join(self.root_dir,self.animal_id, 'tif_files',
+                                             session,
+                                             #session+'_code_04_trial_ROItimeCourses_15sec_pca_0.95_spatial.npy')
+                                             session+'_code_04_trial_ROItimeCourses_30sec_pca_0.95_spatial.npy')
+
+                spatial = np.load(fname_spatial)
+                spatial = np.transpose(spatial,[1,0])
+                denoised_spatial_name = np.reshape(spatial,[128,128,-1])
+                # print ("denoised_spatial_name: ", denoised_spatial_name.shape)
+                #
+
+                ###########################################################
+                # load temporal PC components
+                temporal_trial = np.load(fname_spatial.replace('_spatial',''))
+
+                #
+                temporal_random = np.load(fname_spatial.replace('trial','random').replace('_spatial',''))
+
+                # make sure there are same # of trials in random and trial dataset
+                min_trials = min(temporal_trial.shape[0], temporal_random.shape[0])
+                temporal_trial = temporal_trial[:min_trials]
+                temporal_random = temporal_random[:min_trials]
+
+                #
+                temporal=np.concatenate((temporal_trial,temporal_random),axis=0)
+                temporal = np.transpose(temporal,[1,0,2])
+
+                denoised_temporal_name = np.reshape(temporal,[-1,temporal.shape[1]*temporal.shape[2]])
+                #print('loaded data',flush=True)
+
+                #######################################
+                # Get data in the correct format
+                V=denoised_temporal_name
+                U=denoised_spatial_name
+
+                #
+                brainmask = np.ones(U.shape[:2],dtype=bool)
+
+                # Load true areas if simulated data
+                simulation=0
+
+                # Include nan values of U in brainmask, and put those values to 0 in U
+                brainmask[np.isnan(np.sum(U,axis=2))]=False
+                U[np.isnan(U)]=0
+
+                # Preprocess V: flatten and remove nans
+                dimsV=V.shape
+                keepinds=np.nonzero(np.sum(np.isfinite(V),axis=0))[0]
+                V=V[:,keepinds]
+
+                #
+                if V.shape[0]!=U.shape[-1]:
+                    print('Wrong dimensions of U and V!')
+
+                print("Rank of video : %d" % V.shape[0])
+                print("Number of timepoints : %d" % V.shape[1]);
+
+
+                ##################################################
+                ##################################################
+                ##################################################
+                # Perform the LQ decomposition. Time everything.
+                t0_global = time.time()
+                t0 = time.time()
+                if nonnegative_temporal:
+                    r = V.T
+                else:
+                    q, r = np.linalg.qr(V.T)
+                # time_ests={'qr_decomp':time.time() - t0}
+
+                # Put in data structure for LocaNMF
+                video_mats = (np.copy(U[brainmask]), r.T)
+                rank_range = (1, maxrank, 1)
+                del U
+
+
+                ##################################################
+                ##################################################
+                ##################################################
+
+                #
+                region_mats = LocaNMF.extract_region_metadata(brainmask,
+                                                              self.atlas,
+                                                              min_size=min_pixels)
+
+                #
+                region_metadata = LocaNMF.RegionMetadata(region_mats[0].shape[0],
+                                                         region_mats[0].shape[1:],
+                                                         device=device)
+
+                #
+                region_metadata.set(torch.from_numpy(region_mats[0].astype(np.uint8)),
+                                    torch.from_numpy(region_mats[1]),
+                                    torch.from_numpy(region_mats[2].astype(np.int64)))
+
+
+                ##################################################
+                ##################################################
+                ##################################################
+
+                # grab region names
+                rois=np.load('/home/cat/code/widefield/locanmf/rois_50.npz')
+                rois_name=rois['names']
+
+                rois_ids=rois['ids']
+
+                ##################################################
+                ##################################################
+                ##################################################
+
+                # Do SVD as initialization
+                if device=='cuda':
+                    torch.cuda.synchronize()
+
+                #
+                print('v SVD Initialization')
+                t0 = time.time()
+                region_videos = LocaNMF.factor_region_videos(video_mats,
+                                                             region_mats[0],
+                                                             rank_range[1],
+                                                             device=device)
+                #
+                if device=='cuda':
+                    torch.cuda.synchronize()
+                print("\'-total : %f" % (time.time() - t0))
+                #time_ests['svd_init'] = time.time() - t0
+
+
+                #
+                low_rank_video = LocaNMF.LowRankVideo(
+                    (int(np.sum(brainmask)),) + video_mats[1].shape, device=device
+                )
+                low_rank_video.set(torch.from_numpy(video_mats[0].T),
+                                   torch.from_numpy(video_mats[1]))
+
+
+
+                ##################################################
+                ##################################################
+                ##################################################
+                if device=='cuda':
+                    torch.cuda.synchronize()
+
+                #
+                print('v Rank Line Search')
+                t0 = time.time()
+                try:
+                    # locanmf_comps,loc_save = LocaNMF.rank_linesearch(low_rank_video,
+                    #                                              region_metadata,
+                    #                                              region_videos,
+                    #                                              maxiter_rank=maxrank,
+                    #                                              maxiter_lambda=maxiter_lambda,      # main param to tweak
+                    #                                              maxiter_hals=maxiter_hals,
+                    #                                              lambda_step=lambda_step,
+                    #                                              lambda_init=lambda_init,
+                    #                                              loc_thresh=loc_thresh,
+                    #                                              r2_thresh=r2_thresh,
+                    #                                              rank_range=rank_range,
+                    # #                                             nnt=nonnegative_temporal,
+                    #                                              verbose=[True, False, False],
+                    #                                              sample_prop=(1,1),
+                    #                                              device=device
+                    #                                             )
+
+                    t0 = time.time()
+                    locanmf_comps,loc_save,save_lam,save_scale,save_per,save_spa,save_scratch = LocaNMF.rank_linesearch(low_rank_video,
+                                                                region_metadata,
+                                                                region_videos,
+                                                                maxiter_rank=maxrank,
+                                                                maxiter_lambda=maxiter_lambda,
+                                                                maxiter_hals=maxiter_hals,
+                                                                lambda_step=lambda_step,
+                                                                lambda_init=lambda_init,
+                                                                loc_thresh=loc_thresh,
+                                                                r2_thresh=r2_thresh,
+                                                                rank_range=rank_range,
+                    #                                             nnt=nonnegative_temporal,
+                                                                verbose=[True, False, False],
+                                                                sample_prop=(1,1),
+                                                                device=device
+                                                             )
+                    if device=='cuda':
+                        torch.cuda.synchronize()
+
+                except Exception as e:
+                    print (" locaNMF Failed, skipping")
+                    print (e)
+                    print ('')
+                    print ('')
+                    continue
+                #
+                if device=='cuda':
+                    torch.cuda.synchronize()
+
+
+                # C is the temporal components
+                C = np.matmul(q,locanmf_comps.temporal.data.cpu().numpy().T).T
+                print ("n_comps, n_time pts x n_trials: ", C.shape)
+                qc, rc = np.linalg.qr(C.T)
+
+
+                # Assigning regions to components
+                region_ranks = []; region_idx = []
+
+                for rdx in torch.unique(locanmf_comps.regions.data, sorted=True):
+                    region_ranks.append(torch.sum(rdx == locanmf_comps.regions.data).item())
+                    region_idx.append(rdx.item())
+
+                areas=region_metadata.labels.data[locanmf_comps.regions.data].cpu().numpy()
+
+                # Get LocaNMF spatial and temporal components
+                A=locanmf_comps.spatial.data.cpu().numpy().T
+                A_reshape=np.zeros((brainmask.shape[0],brainmask.shape[1],A.shape[1]));
+                A_reshape.fill(np.nan)
+                A_reshape[brainmask,:]=A
+
+                # C is already computed above delete above
+                if nonnegative_temporal:
+                    C=locanmf_comps.temporal.data.cpu().numpy()
+                else:
+                    C=np.matmul(q,locanmf_comps.temporal.data.cpu().numpy().T).T
+
+                # Add back removed columns from C as nans
+                C_reshape=np.full((C.shape[0],dimsV[1]),np.nan)
+                C_reshape[:,keepinds]=C
+                C_reshape=np.reshape(C_reshape,[C.shape[0],dimsV[1]])
+
+                # Get lambdas
+                lambdas=np.squeeze(locanmf_comps.lambdas.data.cpu().numpy())
+
+
+                # c_p is the trial sturcutre
+                c_p=C_reshape.reshape(A_reshape.shape[2],int(C_reshape.shape[1]/1801),1801)
+
+                #
+                c_plot=c_p.transpose((1,0,2))
+                c_plot.shape
+
+
+                ##################################################
+                ##################################################
+                ##################################################
+                # save LocaNMF data
+                areas_saved = []
+                for area in areas:
+                    idx = np.where(rois_ids==np.abs(area))[0]
+                    temp_name = str(rois_name[idx].squeeze())
+                    if area <0:
+                        temp_name += " - right"
+                    else:
+                        temp_name += " - left"
+
+                    areas_saved.append(temp_name)
+
+                # GET AREA NAMES
+                def parse_areanames_new(region_name,rois_name):
+                    areainds=[]; areanames=[];
+                    for i,area in enumerate(region_name):
+                        areainds.append(area)
+                        areanames.append(rois_name[np.where(rois_ids==np.abs(area))][0])
+                    sortvec=np.argsort(np.abs(areainds))
+                    areanames=[areanames[i] for i in sortvec]
+                    areainds=[areainds[i] for i in sortvec]
+                    return areainds,areanames
+
+                #
+                region_name=region_mats[2]
+
+                # Get area names for all components
+                areainds,areanames_all = parse_areanames_new(region_name,rois_name)
+                areanames_area=[]
+                for i,area in enumerate(areas):
+                    areanames_area.append(areanames_all[areainds.index(area)])
+
+                ###################################
+                np.savez(fname_out,
+                          temporal_trial = c_plot[:int(c_plot.shape[0]/2),:,:],
+                          temporal_random = c_plot[int(c_plot.shape[0]/2):,:,:],
+                          areas = areas,
+                          names = areas_saved,
+                          A_reshape = A_reshape,
+                          areanames_area = areanames_area
+                         )
+
+
+        print (" ... DONE ALL SESSIONS...")
+
+
+    def run_loca_whole_session(self):
+
+        #################################################
+        #################################################
+        #################################################
+        # maxrank = how many max components per brain region. Set maxrank to around 4 for regular dataset.
+        maxrank = 1
+
+        # min_pixels = minimum number of pixels in Allen map for it to be considered a brain region
+        # default min_pixels = 100
+        min_pixels = 200
+
+        # loc_thresh = Localization threshold, i.e. percentage of area restricted to be inside the 'Allen boundary'
+        # default loc_thresh = 80
+        loc_thresh = 75
+
+        # r2_thresh = Fraction of variance in the data to capture with LocaNMF
+        # default r2_thresh = 0.99
+        r2_thresh = 0.96
+
+        # Do you want nonnegative temporal components? The data itself should also be nonnegative in this case.
+        # default nonnegative_temporal = False
+        nonnegative_temporal = False
+
+
+        # maxiter_hals = Number of iterations in innermost loop (HALS). Keeping this low provides a sort of regularization.
+        # default maxiter_hals = 20
+        maxiter_hals = 20
+
+        # maxiter_lambda = Number of iterations for the lambda loop. Keep this high for finding a good solution.
+        # default maxiter_lambda = 100
+        maxiter_lambda = 150
+
+        # lambda_step = Amount to multiply lambda after every lambda iteration.
+        # lambda_init = initial value of lambda. Keep this low. default lambda_init = 0.000001
+        # lambda_{i+1}=lambda_i*lambda_step. lambda_0=lambda_init. default lambda_step = 1.35
+        # lambda_step = 1.25
+        # lambda_init = 1e-4
+
+        # NEW PARAMS SUGGESTED BY YONGXU July ~20
+        lambda_step = 2.25
+        lambda_init = 1e-1
+
+        ######################################################
+        ######################################################
+        ######################################################
+        for session in self.sessions:
+
+            # output filename
+            fname_out = os.path.join(self.root_dir,self.animal_id,'tif_files',
+                                     session,session+'_locanmf_wholestack.npz')
+
+            #
+            if os.path.exists(fname_out)==False:
+
+                fname_locs = os.path.join(self.root_dir, self.animal_id, 'tif_files',
+                                          session, session + '_all_locs_selected.txt')
+                if os.path.exists(fname_locs)==False:
+                    print ("  no lever pulls, skipping ")
+                    continue
+
+                n_locs = np.loadtxt(fname_locs)
+                print ("")
+                print ("")
+                print (session, " has n trials: ", n_locs.shape)
+                if n_locs.shape[0]<self.min_trials:
+                    print ("  too few trials, skipping ", n_locs.shape[0])
+                    continue
+
+                ###########################################################
+                # load spatial footprints from PCA compressed data
+                fname_spatial = os.path.join(self.root_dir,self.animal_id, 'tif_files',
+                                             session,
+                                             #session+'_code_04_trial_ROItimeCourses_15sec_pca_0.95_spatial.npy')
+                                             session+
+                                             #'_code_04_trial_ROItimeCourses_30sec_pca_0.95_spatial.npy')
+                                             '_whole_stack_trial_ROItimeCourses_15sec_pca30components_spatial.npy')
+
+                spatial = np.load(fname_spatial)
+                spatial = np.transpose(spatial,[1,0])
+                denoised_spatial_name = np.reshape(spatial,[128,128,-1])
+                # print ("denoised_spatial_name: ", denoised_spatial_name.shape)
+                #
+
+                ###########################################################
+                # load temporal PC components
+                temporal_whole_stack = np.load(fname_spatial.replace('_spatial',''))
+
+                ##
+                # temporal_random = np.load(fname_spatial.replace('trial','random').replace('_spatial',''))
+
+                # make sure there are same # of trials in random and trial dataset
+                #min_trials = min(temporal_trial.shape[0], temporal_random.shape[0])
+                #temporal_trial = temporal_trial[:min_trials]
+                #temporal_random = temporal_random[:min_trials]
+
+                #
+                temporal= temporal_whole_stack
+                #temporal = np.transpose(temporal,[1,0,2])  #feautures, n_trials, n_times
+
+                # flatten whole stack
+                #denoised_temporal_name = np.reshape(temporal,[-1,temporal.shape[1]*temporal.shape[2]])
+                denoised_temporal_name = temporal.transpose(1,0)
+
+                #print('loaded data',flush=True)
+
+                #######################################
+                # Get data in the correct format
+                V=denoised_temporal_name
+                U=denoised_spatial_name
+
+                #
+                brainmask = np.ones(U.shape[:2],dtype=bool)
+
+                # Load true areas if simulated data
+                simulation=0
+
+                # Include nan values of U in brainmask, and put those values to 0 in U
+                brainmask[np.isnan(np.sum(U,axis=2))]=False
+                U[np.isnan(U)]=0
+
+                # Preprocess V: flatten and remove nans
+                dimsV=V.shape
+                keepinds=np.nonzero(np.sum(np.isfinite(V),axis=0))[0]
+                V=V[:,keepinds]
+
+                #
+                if V.shape[0]!=U.shape[-1]:
+                    print('Wrong dimensions of U and V!')
+
+                print("Rank of video : %d" % V.shape[0])
+                print("Number of timepoints : %d" % V.shape[1]);
+
+
+                ##################################################
+                ##################################################
+                ##################################################
+                # Perform the LQ decomposition. Time everything.
+                t0_global = time.time()
+                t0 = time.time()
+                if nonnegative_temporal:
+                    r = V.T
+                else:
+                    q, r = np.linalg.qr(V.T)
+                # time_ests={'qr_decomp':time.time() - t0}
+
+                # Put in data structure for LocaNMF
+                video_mats = (np.copy(U[brainmask]), r.T)
+                rank_range = (1, maxrank, 1)
+                del U
+
+
+                ##################################################
+                ##################################################
+                ##################################################
+
+                #
+                region_mats = LocaNMF.extract_region_metadata(brainmask,
+                                                              self.atlas,
+                                                              min_size=min_pixels)
+
+                #
+                region_metadata = LocaNMF.RegionMetadata(region_mats[0].shape[0],
+                                                         region_mats[0].shape[1:],
+                                                         device=device)
+
+                #
+                region_metadata.set(torch.from_numpy(region_mats[0].astype(np.uint8)),
+                                    torch.from_numpy(region_mats[1]),
+                                    torch.from_numpy(region_mats[2].astype(np.int64)))
+
+
+                ##################################################
+                ##################################################
+                ##################################################
+
+                # grab region names
+                rois=np.load('/home/cat/code/widefield/locanmf/rois_50.npz')
+                rois_name=rois['names']
+
+                rois_ids=rois['ids']
+
+                ##################################################
+                ##################################################
+                ##################################################
+
+                # Do SVD as initialization
+                if device=='cuda':
+                    torch.cuda.synchronize()
+
+                #
+                print('v SVD Initialization')
+                t0 = time.time()
+                region_videos = LocaNMF.factor_region_videos(video_mats,
+                                                             region_mats[0],
+                                                             rank_range[1],
+                                                             device=device)
+                #
+                if device=='cuda':
+                    torch.cuda.synchronize()
+                print("\'-total : %f" % (time.time() - t0))
+                #time_ests['svd_init'] = time.time() - t0
+
+
+                #
+                low_rank_video = LocaNMF.LowRankVideo(
+                    (int(np.sum(brainmask)),) + video_mats[1].shape, device=device
+                )
+                low_rank_video.set(torch.from_numpy(video_mats[0].T),
+                                   torch.from_numpy(video_mats[1]))
+
+
+
+                ##################################################
+                ##################################################
+                ##################################################
+                if device=='cuda':
+                    torch.cuda.synchronize()
+
+                #
+                print('v Rank Line Search')
+                t0 = time.time()
+                try:
+                    #
+                    locanmf_comps,loc_save,save_lam,save_scale,save_per,save_spa,save_scratch = LocaNMF.rank_linesearch(low_rank_video,
+                                                                region_metadata,
+                                                                region_videos,
+                                                                maxiter_rank=maxrank,
+                                                                maxiter_lambda=maxiter_lambda,
+                                                                maxiter_hals=maxiter_hals,
+                                                                lambda_step=lambda_step,
+                                                                lambda_init=lambda_init,
+                                                                loc_thresh=loc_thresh,
+                                                                r2_thresh=r2_thresh,
+                                                                rank_range=rank_range,
+                    #                                             nnt=nonnegative_temporal,
+                                                                verbose=[True, False, False],
+                                                                sample_prop=(1,1),
+                                                                device=device
+                                                             )
+                    if device=='cuda':
+                        torch.cuda.synchronize()
+
+                except Exception as e:
+                    print (" locaNMF Failed, skipping")
+                    print (e)
+                    print ('')
+                    print ('')
+                    continue
+                #
+                if device=='cuda':
+                    torch.cuda.synchronize()
+
+
+                # C is the temporal components
+                C = np.matmul(q,locanmf_comps.temporal.data.cpu().numpy().T).T
+                print ("n_comps, n_time pts x n_trials: ", C.shape)
+                qc, rc = np.linalg.qr(C.T)
+
+
+                # Assigning regions to components
+                region_ranks = []; region_idx = []
+
+                for rdx in torch.unique(locanmf_comps.regions.data, sorted=True):
+                    region_ranks.append(torch.sum(rdx == locanmf_comps.regions.data).item())
+                    region_idx.append(rdx.item())
+
+                areas=region_metadata.labels.data[locanmf_comps.regions.data].cpu().numpy()
+
+                # Get LocaNMF spatial and temporal components
+                A=locanmf_comps.spatial.data.cpu().numpy().T
+                A_reshape=np.zeros((brainmask.shape[0],brainmask.shape[1],A.shape[1]));
+                A_reshape.fill(np.nan)
+                A_reshape[brainmask,:]=A
+
+                # C is already computed above delete above
+                if nonnegative_temporal:
+                    C=locanmf_comps.temporal.data.cpu().numpy()
+                else:
+                    C=np.matmul(q,locanmf_comps.temporal.data.cpu().numpy().T).T
+
+                # Add back removed columns from C as nans
+                C_reshape=np.full((C.shape[0],dimsV[1]),np.nan)
+                C_reshape[:,keepinds]=C
+                C_reshape=np.reshape(C_reshape,[C.shape[0],dimsV[1]])
+
+                # Get lambdas
+                lambdas=np.squeeze(locanmf_comps.lambdas.data.cpu().numpy())
+
+                print ("A_reshape: ", A_reshape.shape)
+                print ("C_reshape: ", C_reshape.shape)
+
+
+
+                ##################################################
+                ##################################################
+                ##################################################
+                # save LocaNMF data
+                areas_saved = []
+                for area in areas:
+                    idx = np.where(rois_ids==np.abs(area))[0]
+                    temp_name = str(rois_name[idx].squeeze())
+                    if area <0:
+                        temp_name += " - right"
+                    else:
+                        temp_name += " - left"
+
+                    areas_saved.append(temp_name)
+
+                # GET AREA NAMES
+                def parse_areanames_new(region_name,rois_name):
+                    areainds=[]; areanames=[];
+                    for i,area in enumerate(region_name):
+                        areainds.append(area)
+                        areanames.append(rois_name[np.where(rois_ids==np.abs(area))][0])
+                    sortvec=np.argsort(np.abs(areainds))
+                    areanames=[areanames[i] for i in sortvec]
+                    areainds=[areainds[i] for i in sortvec]
+                    return areainds,areanames
+
+                #
+                region_name=region_mats[2]
+
+                # Get area names for all components
+                areainds,areanames_all = parse_areanames_new(region_name,rois_name)
+                areanames_area=[]
+                for i,area in enumerate(areas):
+                    areanames_area.append(areanames_all[areainds.index(area)])
+
+                ###################################
+                np.savez(fname_out,
+                          whole_stack = C_reshape,
+                          areas = areas,
+                          names = areas_saved,
+                          A_reshape = A_reshape,
+                          areanames_area = areanames_area
+                         )
+
+
+        print (" ... DONE ALL SESSIONS...")
+
+
+
+
+    def show_ROIs(self, session=None):
+
+        if session is None:
+            session = self.sessions[0]
+
+        fname_in = os.path.join(self.root_dir,self.animal_id,'tif_files',
+                                  session,session+'_locanmf.npz')
+        data = np.load(fname_in, allow_pickle=True)
+
+        A_reshape = data["A_reshape"]
+        areanames_area = data['areanames_area']
+
+        ######################################################
+        fig=plt.figure()
+        for i in range(A_reshape.shape[2]):
+            plt.subplot(4,4,i+1)
+            plt.imshow(A_reshape[:,:,i])
+            plt.title(areanames_area[i],fontsize=6)
+        plt.tight_layout(h_pad=0.5,w_pad=0.5)
+        plt.show()
+
+
+
+def plot_polar_plots(t0_phases):
+
+    clrs_local = ['magenta','brown','pink','lightblue','darkblue', 'blue']
+    codes = ['_Retrosplenial', '_barrel', '_limb', '_visual','_motor','']
+
+    fig2=plt.figure(figsize=(15,5))
+
+    #
+    for k in range(len(t0_phases)):
+        ax = fig2.add_subplot(1,5,k+1, projection='polar')
+        plt.title(codes[k].replace('_',''),fontsize=10)
+        N = 16
+
+        #
+        conversion= 1
+
+        #
+        bins = np.linspace(0,2*np.pi*conversion, N+1)
+        phases1 = np.array(t0_phases[k])*conversion
+        y = np.histogram(phases1,
+                        bins = bins
+                        #bins = np.arange(0,360+45,45),
+                        )
+        #
+        theta = y[0]#[:-1]
+        theta = theta/np.max(theta)  # not necessary
+        radii = y[1][1:]
+
+        #
+        width = (2*np.pi) / (N)
+        ax.bar(radii-width/2.,
+               theta,
+               width=width,
+               color=clrs_local[k])
+
+        #
+        ax.set_yticklabels([])
+        #plt.title(codes[k])
+        ax.yaxis.grid(False)
+
+        #ax.set_xticks([])
+        ax.xaxis.set_tick_params(labelsize=12)
+        #if True:
+        #    ax.set_xticklabels([])
+
+
+
+def plot_histograms_schimdthetal(data_dir, animal_ids, feat):
+    #
+    clrs_anims = ['red','blue']
+
+    #
+    codes = ['_Retrosplenial', '_barrel', '_limb', '_visual','_motor','']
+    clrs_local = ['red','blue','pink','lightblue','darkblue', 'green']
+    #feat = 4
+
+    #
+    fig=plt.figure()
+    for ctra, animal_id in enumerate(animal_ids):
+        fname = os.path.join(data_dir,
+                             'all_phases_all_trials_'+animal_id+'.npy')
+
+        data2 = np.vstack(np.load(fname,
+                      allow_pickle=True))
+
+        #
+        data = []
+        for k in range(len(data2)):
+            data.append(data2[k][feat])
+
+        if True:  # all sessions
+            data = np.hstack(data)
+        else:
+            data = np.hstack(t0_phases[feat])  #single session
+
+
+        #########################################
+        yy = data/np.pi*180
+        width = 90
+        offset = 0
+        bins = np.arange(offset,361+offset,width)
+        y = np.histogram(yy, bins=bins)
+
+        yy = y[0]
+        yy = np.roll(yy,3)
+        shift = 90
+        plt.bar(y[1][:-1]+width//2+ctra*30,
+                yy/np.sum(yy),
+                width//3,
+                color=clrs_local[ctra],
+                alpha=.8,
+                label = animal_id)
+
+        #
+        plt.xlim(y[1][0],y[1][-2]+width*1.5)
+
+          #
+    plt.suptitle("Phases of "+codes[feat])
+    labels2 = ['crest','falling','trough','rising']
+    plt.xticks(np.arange(0,360,90)+60, labels2)
+    plt.legend()
+
+
+
+def plot_phases2(session_id,
+                animal_id,
+                session_name,
+                root_dir,
+                random_flag,
+                areas_to_plot_phases,
+                start,
+                end,
+                show_area_id,
+                codes,
+                clrs_local,
+                plotting):
+
+    ''' function that fits phases to raw locanm components
+
+    '''
+
+    if True:
+        #print ("session_id: ", session_id)
+        (atlas,
+         areas,
+         names,
+         locaNMF_temporal,
+         locaNMF_temporal_random) = load_locaNMF_temporal(animal_id,
+                                                          session_name,
+                                                          root_dir,
+                                                          session_id)
+    # except:
+    #    # print (" couldn't load file")
+    #     return ([[],[],[],[],[]])
+
+        #     for ctr, name in enumerate(names):
+
+#         print (ctr, name)
+
+    #print ("GOT HERE")
+    if atlas is None:
+        #print ("session is empty ")
+        return ([[],[],[],[],[]])
+    #
+    if plotting:
+        fig=plt.figure(figsize=(15,10))
+        colors = plt.cm.viridis(np.linspace(0,1,len(locaNMF_temporal)))
+
+    # loop over areas
+    t0_phases=[]
+
+    for ctr_area, area_sel in enumerate(areas_to_plot_phases):
+        #
+        t0_phases.append([])
+
+        #
+        areas_selected = []
+        for k in range(len(names)):
+            if area_sel in names[k]:
+                areas_selected.append(k)
+
+        # use random data instead
+        if random_flag:
+            locaNMF_temporal = locaNMF_temporal_random
+
+        #
+        areas_selected = np.array(areas_selected)
+        locaNMF_temporal2 = locaNMF_temporal[:,areas_selected].squeeze()
+
+        #
+        missed_fit = 0
+        t = np.arange(locaNMF_temporal2.shape[1])/30-30
+        curves=[]
+
+       # print ("# trials: ", locaNMF_temporal2.shape[0])
+        for k in range(locaNMF_temporal2.shape[0]):
+            if ctr_area==show_area_id:
+                if plotting:
+                    ax=plt.subplot(2,1,1)
+                    plt.plot(t,locaNMF_temporal2[k],
+                         c='black',
+                         linewidth=3,
+                         alpha=.1)
+
+            # fit sinusoid to the single trial data
+            tt = t[start:end]
+            yy = locaNMF_temporal2[k][start:end]
+
+            #
+            try:
+                tt2 = np.arange(0, locaNMF_temporal2[k].shape[0],1)/30.-30
+                res = fit_sin(tt, yy)
+                curve = res["fitfunc"](tt2)
+
+                #print ("CURVE: ", curve.shape)
+                # if curve fit, extrapolate all the way to -30sec
+
+                if plotting:
+                    if ctr_area==show_area_id:
+                        ax=plt.subplot(2,1,2)
+                        curve2 = (curve-np.min(curve))/(np.max(curve)-np.min(curve))*2-1
+                        curves.append(curve2)
+                        plt.plot(tt2,
+                                 curve2,
+                                 linewidth=2,
+                                 #c=clrs_local[show_area_id],
+                                 c='pink',
+                                 alpha=.5
+                            )
+                        plt.scatter(tt2[900],
+                                 curve2[900],
+                                 edgecolor='black',
+                                 c=clrs_local[show_area_id],
+                                 alpha=1
+                            )
+
+                # get peaks of curves
+                phase = get_angle_from_sinusoid(curve, 900)
+
+                #
+                t0_phases[ctr_area].append(phase)
+
+            #
+            except:
+                t0_phases[ctr_area].append(np.nan)
+                missed_fit+=1
+
+
+        ###############################
+        ######## PLOT MEANS ###########
+        ###############################
+        if ctr_area==show_area_id:
+            #curves=np.array(curves)
+            mean = np.mean(locaNMF_temporal2,axis=0)
+            if plotting:
+                ax=plt.subplot(2,1,1)
+                plt.plot(t,mean,
+                         c='black',
+                         linewidth=8,
+                         alpha=1)
+
+                #
+                plt.plot([-30,30],[0,0],'--',c='grey')
+                plt.xlim(-15,1)
+                plt.plot([0,0],[-10,10],'--',c='grey')
+                plt.ylim(-0.15,0.20)
+
+
+            # fit sinusoid to trial average
+            try:
+                tt = t[start:end]
+                curves=np.array(curves)
+                mean = np.mean(curves,axis=0)
+                tt2 = np.arange(0,mean.shape[0],1)/30.-30
+                yy = mean[start:end]
+
+                res = fit_sin(tt, yy)
+                #print( "Amplitude=%(amp)s, Angular freq.=%(omega)s, phase=%(phase)s, offset=%(offset)s, Max. Cov.=%(maxcov)s" % res )
+
+                # PLOT REAL AVERAGE NOT FIT
+
+                if plotting:
+                    mean = np.mean(curves,axis=0)
+                    ax=plt.subplot(2,1,2)
+                    #plt.plot(tt, yy, "-k", label="y", linewidth=2)
+                    plt.plot(tt2, mean, linewidth=8,
+                            #c=clrs_local[show_area_id]
+                            c='pink'
+                            )
+
+                    #
+                    plt.plot([-30,30],[0,0],'--',c='grey')
+                    plt.plot([0,0],[-10,10],'--',c='grey')
+                    plt.xlim(-15,1)
+                    plt.ylim(-0.15,0.15)
+                    plt.ylim(-1,1)
+            except:
+                pass
+
+
+    ###############################################################
+    ###############################################################
+    ###############################################################
+
+    my_dict = dict(restrosplenial = t0_phases[0],
+                   barrel = t0_phases[1],
+                   limb = t0_phases[2],
+                   visual = t0_phases[3],
+                   motor = t0_phases[4])
+
+    data = pd.DataFrame.from_dict(my_dict, orient='index')
+    data = data.transpose()
+
+    #
+    flierprops = dict(marker='o',
+                      #markerfacecolor='g',
+                      #markersize=10000,
+                      linestyle='none',
+                      markeredgecolor='r')
+
+    #
+    if False:
+        ax = fig.add_subplot(313)
+        data.boxplot(showfliers=False,
+                flierprops=flierprops)
+
+        #
+        for i,d in enumerate(data):
+            colors = plt.cm.viridis(np.linspace(0,1,len(t0_phases[i])))
+            y = data[d]
+            x = np.random.normal(i+1, 0.04, len(y))
+            if False:
+                plt.plot(x, y,
+                     mfc = 'black',
+                     mec='k',
+                     ms=7,
+                     marker="o",
+                     linestyle="None",
+                        )
+            #
+            else:
+                x = np.random.normal(i+1, 0.04, len(t0_phases[i]))
+                #print (i,d, ' y shape: ', y.shape)
+                plt.scatter(x, t0_phases[i],
+                           #c=clrs_local[i],
+                           c=clrs_local[i],
+                           edgecolor='black',
+                           s=200,
+                           #alpha=np.linspace(.2, 1.0, x.shape[0])
+                           alpha=.2
+                           )
+
+        plt.ylim(0,2*np.pi)
+
+    # print ("# of non-fit trias: ", missed_fit)
+
+    return t0_phases
+
+def plot_all_sessions_polar_plots(root_dir,
+                                  animal_id,
+                                  random_flag):
+# #
+#     #
+#     areas_to_plot_phases = ['Retrosplenial area, dorsal part, layer 1 - left',
+#                             'Primary somatosensory area, barrel field, layer 1 - left',
+#                             'upper limb, layer 1 - left',
+#                             'Primary visual area, layer 1 - left',
+#                             'Primary motor area, Layer 1 - left',
+#                            ]
+
+    #
+    codes = ['_Retrosplenial', '_barrel', '_limb', '_visual','_motor','']
+
+    #
+    if random_flag==False:
+        fname = os.path.join(root_dir,'all_phases_all_trials_'+animal_id+'.npy')
+    else:
+        fname = os.path.join(root_dir,'all_phases_all_trials_random_'+animal_id+'.npy')
+
+    #
+    t0_array = np.load(fname, allow_pickle=True)
+
+    #####################################
+    ############ MAKE PLOTS #############
+    #####################################
+    t0_phases = []
+    for k in range(5):
+        t0_phases.append([])
+
+    #
+    #fig=plt.figure(figsize=(15,3))
+    for k in range(len(t0_array)):
+        for p in range(len(t0_array[0])):
+            t0_phases[p].append(t0_array[k][p])
+
+    for k in range(5):
+        t0_phases[k] = np.hstack(t0_phases[k])
+
+
+    plot_polar_plots(t0_phases)
+
+    import pycircstat
+    for k in range(len(t0_phases)):
+        temp = t0_phases[k]
+        idx = np.where(np.isnan(temp)==False)[0]
+        temp = temp[idx]
+
+        p, z = pycircstat.tests.rayleigh(temp)
+        print (animal_id, codes[k], "rayleightest test : ", p,z)
+
+    plt.show()
+    # #
+    # if False:
+    #     plt.savefig('/home/cat/all_polar_'+animal_id+str(random_flag)+'.svg')
+    #     plt.close()
+    # else:
+    #     plt.show()
+    # #ctr_a+=1
+
+
+
+from scipy.signal import butter, lfilter, filtfilt, hilbert, chirp
+
+def butter_lowpass(cutoff, nyq_freq, order=4):
+    normal_cutoff = float(cutoff) / nyq_freq
+    b, a = butter(order, normal_cutoff, btype='lowpass')
+    return b, a
+
+def butter_lowpass_filter(data, cutoff_freq, nyq_freq, order=4):
+    # Source: https://github.com/guillaume-chevalier/filtering-stft-and-laplace-transform
+    b, a = butter_lowpass(cutoff_freq, nyq_freq, order=order)
+    y = filtfilt(b, a, data)
+    return y
+
+
+
+def plot_RP_and_hilbert_transform(data_dir, animal_id, session_id, random_flag):
+
+    fname = os.path.join(data_dir,
+                         animal_id,
+                         session_id,
+                         session_id+'_locanmf.npz')
+
+    data = np.load(fname, allow_pickle=True)
+
+    #
+    trials = data['temporal_trial']
+    random = data['temporal_random']
+
+    #
+    names = data['names']
+    name = 'motor'
+
+
+    t = []
+    r = []
+    for k in range(trials.shape[1]):
+        if name in names[k]:
+            t.append(trials[:,k].mean(0))
+            r.append(random[:,k].mean(0))
+
+    #
+    t = np.array(t).mean(0)
+    r = np.array(r).mean(0)
+
+    if random_flag==False:
+        pass
+    else:
+        t=r.copy()
+
+    #
+    filter_cutoff = 14
+    t = butter_lowpass_filter(t, filter_cutoff,30)*100
+
+    #
+    x = np.arange(t.shape[0])/30.-30
+
+    #
+    analytic_signal = hilbert(t)
+    amplitude_envelope = np.abs(analytic_signal)
+    amplitude_envelope = butter_lowpass_filter(amplitude_envelope,.5,30)
+
+    #
+    fig=plt.figure()
+
+    start = 300
+    end = 1050
+    t = t[start:end]
+    r = r[start:end]
+    x = x[start:end]
+    amplitude_envelope = amplitude_envelope[start:end]
+
+    plt.plot(x, t, c='darkblue', linewidth=5, label='Average session neural signal')
+    plt.plot(x, amplitude_envelope, '--', c='black', linewidth=1, label="Hilbert transform envelope")
+
+
+    #
+    plt.plot([x[0], x[-1]],[0,0],'--',c='black', linewidth=3)
+    plt.plot([x[600], x[600]],[-5,7],'--',c='black', linewidth=3)
+
+    plt.xlim(x[0],x[-1])
+    plt.ylim(-5,7)
+    plt.ylabel("DFF")
+    plt.xlabel("Time (sec)")
+    plt.legend()
+
+#
+def smooth(y, box_pts):
+    box = np.ones(box_pts)/box_pts
+    #print ("box: ", box.shape)
+    y_smooth = np.convolve(y, box, mode='same')
+    #print ("y)mooth: ", y_smooth.shape)
+    return y_smooth
+
+#
+def plot_svm_accuracy(data_dir,animal_id, session_id):
+
+    #
+    fname = os.path.join(data_dir,
+                     animal_id,
+                     session_id,
+                     "SVM_Scores_"+session_id+
+                    "code_04_trial_ROItimeCourses_30sec_Xvalid10_Slidewindow30.npz")
+    #
+    data = np.load(fname, allow_pickle=True)
+    accuracy = data['accuracy']
+
+    # convert to percentage
+    accuracy = accuracy *100
+
+    # smooth accuracy using same SVM window length
+    svm_window_len = 30
+    for k in range(accuracy.shape[1]):
+        accuracy[:,k] = smooth(accuracy[:,k], svm_window_len)
+
+    #
+    means = accuracy.mean(axis=1)
+    std = np.std(accuracy,axis=1)
+
+    #
+    t=np.arange(means.shape[0])/30.-29
+    plt.plot(t, means)
+    plt.fill_between(t, means+std, means-std,
+                     color='blue',
+                     alpha=.2)
+    #
+    plt.plot([-20,4],[50,50],'--', c='black')
+    plt.plot([0,0],[40,100],'--', c='black')
+    plt.xlim(-20,4)
+    plt.ylim(40,100)
+    plt.ylabel("SVM Decoding Accuracy (%)")
+    plt.xlabel("Time to lever pull (sec)")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from matplotlib import gridspec
 import matplotlib.patches as mpatches
+from sklearn import datasets, linear_model
 
 import parmap
 import numpy as np
@@ -10,11 +11,15 @@ import os
 import pickle
 from sklearn.decomposition import PCA
 import pycorrelate
+from tqdm import tqdm, trange
+
 
 from scipy.spatial import ConvexHull
 from tqdm import trange
 from scipy.spatial import cKDTree
 import pandas as pd
+import scipy
+from statsmodels.stats.multitest import multipletests
 
 import glob2
 import scipy
@@ -1350,8 +1355,6 @@ class Visualize():
                 all_trials,
                 color,
                 ax):
-
-        from sklearn import datasets, linear_model
 
         # Create linear regression object
         regr = linear_model.LinearRegression()
@@ -2973,9 +2976,62 @@ def plot_pca_timecourses(animal_id,
 class PCA_Analysis():
 
     def __init__(self):
-
         self.clr_ctr = 0
 
+#
+def project_data_pca2(pa):
+
+    # p_lever = np.zeros((pa.n_frames,
+    #                     pa.triggers.shape[0],
+    #                     pa.n_pca))
+    print (pa.n_frames,
+           pa.triggers.shape[0],
+           pa.n_pca)
+
+    #
+    # total_frames = pa.n_frames
+    p_lever = []
+
+    # loop over
+    for t in trange(pa.n_frames):
+        arr = []
+        #if True:
+
+        #
+        try:
+            # loop over every lever pull/behavior instance
+            for k in range(pa.triggers.shape[0]):
+
+                # grab a snippet of raw data (PCA compressed usually)
+                # this snippet ranges from two time points
+                temp = pa.X[pa.triggers[k]-pa.t1-t:pa.triggers[k]-pa.t2-t]
+
+                # make sure we are not out of bounds
+                if temp.shape[0] == (pa.t1-pa.t2):
+                    temp = temp.reshape(temp.shape[0],
+                                   -1)
+                    #
+                    arr.append(temp.reshape(-1))
+
+            #
+            arr = np.array(arr)
+            res = pa.pca.transform(arr)
+            #p_lever[t] = res
+            p_lever.append(res)
+
+        except:
+            pass
+
+
+    p_lever = np.array(p_lever)
+    #
+    # # remove any skipped values
+    # if total_frames<pa.n_frames:
+    #     p_lever = p_lever[:total_frames]
+
+    #print (" pca p_levefr resahped: ", p_lever.shape)
+
+    return p_lever
 
 def get_data_and_triggers(pa):
 
@@ -2992,27 +3048,19 @@ def get_data_and_triggers(pa):
                                  pa.session,
                                  pa.session+ '_aligned_butterworth_0.1hz_6.0hz.npy')
 
-    try:
-        meta = np.load(fname_triggers)
-        data = np.load(fname_data)
-    except:
-        print (" data missing/led missing")
-        return None, None
+    meta = np.load(fname_triggers)
+    data = np.load(fname_data)
+#    except:
+ #       print (" data missing/led missing")
+  #      return None, None
 
     end_blue = meta['end_blue']
     start_blue = meta['start_blue']
     triggers = meta['img_frame_triggers']
 
-    #print (" triggers: ", triggers.shape)
-
-    #
-    #print (" data: ", data.shape)
-
     data_led = data[start_blue:end_blue]
-    #print (data_led.shape)
 
     X = data_led.reshape(data_led.shape[0],-1)
-    #print ("X: ", X.shape)
 
     return X, triggers
 
@@ -3027,6 +3075,8 @@ def get_pca_object_and_all_points(pa):
     X_30 = []
     for k in range(0,pa.X.shape[0]-100,pa.sliding_window):
         X_30.append(pa.X[k:k+pa.sliding_window])
+
+    #
     X_30 = np.array(X_30)
     X_30 = X_30.reshape(X_30.shape[0],-1)
     print(" X data using : ", pa.sliding_window, " number of frames ", X_30.shape)
@@ -3175,6 +3225,8 @@ def project_data_umap(pa):
     print (" umap p_levefr resahped: ", p_lever.shape)
 
     return p_lever
+
+#
 def plot_pca_scatter_multi(pa,
                      n_frames = 30,
                      clr = 'red',
@@ -3298,83 +3350,247 @@ def plot_pca_scatter_multi(pa,
 
     return pa
 
-def plot_pca_scatter(pa,
-                     n_frames = 30,
-                     plot_all = True,
-                     plot_3D=True):
 
-    fig =plt.figure()
-    if plot_3D:
-        ax = fig.add_subplot(projection='3d')
-    else:
-        ax =plt.subplot(111)
+def plot_pca_scatter(pa):
 
-    clrs = ['red','pink','yellow']
-    cmap = matplotlib.cm.get_cmap('jet_r')
+    #
+    ax =plt.subplot(111)
 
-    idx = np.arange(pa.all_points.shape[0])
-    print (idx.shape)
+    cmap = pa.cmap
 
-    print ("plever: ", pa.p_lever.shape)
+    # idx = np.arange(pa.all_points.shape[0])
+    # print (idx.shape)
+
+    #print ("plever: ", pa.p_lever.shape)
     start = 0
-    end = n_frames
+    end = pa.n_frames
 
-    #
-    #for k in range(X_lever.shape[0]):
-    for k in range(start,end,1):
-        if plot_3D:
-            ax.scatter(pa.p_lever[k,:,0],
-                       pa.p_lever[k,:,1],
-                       pa.p_lever[k,:,2],
-                    color=cmap(k/(end-start)),
-                    s=20,
-                    edgecolor = 'black', alpha=.8)
+
+    #############################################
+    ########## PLOT LEVER DYNAMICS ##############
+    #############################################
+    from sklearn.neighbors import NearestNeighbors
+    if pa.knn_triage is not None:
+        triage_value = pa.knn_triage
+        knn_triage_threshold = 100*(1-triage_value)
+
+        ########### LEVER PULL #############
+        p_lever_triaged = []
+
+        # this function triages based only on t=0, i.e. not at every time point; makes better plots
+        # also do triage based on first 2 dimensions
+        if pa.knn_triage_based_on_last_point:
+            temp_points = pa.p_lever[0,:,:2]
+            print ("data-in: ", temp_points.shape)
+
+            # print ("temp points: ", temp_points.shape)
+            idx_keep = knn_triage(knn_triage_threshold, temp_points)
+            idx_keep = np.where(idx_keep==1)[0]
+
+            pa.p_lever_plot = pa.p_lever[:,idx_keep]
+            print ("temp_points post: ", pa.p_lever_plot .shape)
+
+        #
         else:
-            ax.scatter(pa.p_lever[k,:,0],
-                       pa.p_lever[k,:,1],
-                    color=cmap(k/(end-start)),
-                    s=20,
-                    edgecolor = 'black', alpha=.8)
+            for k in range(pa.p_lever.shape[0]):
+                temp_points = pa.p_lever[k,:,:2]
 
-    if plot_3D:
+                # print ("temp points: ", temp_points.shape)
+                idx_keep = knn_triage(knn_triage_threshold, temp_points)
+                idx_keep = np.where(idx_keep==1)[0]
 
-        if plot_all:
-            ax.scatter(pa.all_points[idx,0],
-                   pa.all_points[idx,1],
-                   pa.all_points[idx,2],
-                    c='black',
-                    s=20,
-                    edgecolor = 'black', alpha=.2)
+                temp_points = temp_points[idx_keep]
+                p_lever_triaged.append(temp_points)
 
-        ax.scatter(pa.p_lever[0,:,0],
-                   pa.p_lever[0,:,1],
-                   pa.p_lever[0,:,2],
-                    color='red',
-                    s=100,
-                    edgecolor = 'black', alpha=.8)
+            p_lever_triaged = np.array(p_lever_triaged)
+            pa.p_lever_plot = p_lever_triaged
+
+        ############ ALL POINTS #############
+        if pa.plot_all:
+            temp_points = pa.all_points
+
+           # print ("all points pre triage: ", temp_points.shape)
+            idx_keep = knn_triage(knn_triage_threshold, temp_points)
+            idx_keep = np.where(idx_keep==1)[0]
+            temp_points = temp_points[idx_keep]
+            #print ("all points post triage: ", temp_points.shape)
+
+            pa.all_points_plot = temp_points
 
     else:
+        pa.p_lever_plot = pa.p_lever
+        pa.all_points_plot = pa.all_points
 
-        if plot_all:
-            ax.scatter(pa.all_points[idx,0],
-                   pa.all_points[idx,1],
+    #############################################
+    ########## PLOT LEVER DYNAMICS ##############
+    #############################################
+    # plot all dyanmics - black dots
+    if pa.plot_all:
+        ax.scatter(pa.all_points_plot[:,0],
+                   pa.all_points_plot[:,1],
                     c='black',
                     s=100,
-                    edgecolor = 'black', alpha=.8)
+                    #edgecolor = 'black',
+                    alpha=pa.alpha2)
 
-        ax.scatter(pa.p_lever[0,:,0],
-                   pa.p_lever[0,:,1],
-                    color='red',
-                    s=100,
-                    edgecolor = 'black', alpha=.8)
+    # plot t1 to t2 dynamics
+    if pa.plot_dynamics:
+        for k in range(start,end,1):
+            ax.scatter(pa.p_lever_plot[k,:,0],
+                       pa.p_lever_plot[k,:,1],
+                        color=cmap(k/(end-start)),
+                        s=20,
+                        edgecolor = 'black',
+                        alpha=pa.alpha1)
 
+    # plot t=0 dynamcs
+    if pa.t0_dynamics:
+        ax.scatter(pa.p_lever_plot[0,:,0],
+           pa.p_lever_plot[0,:,1],
+           color='blue',
+           s=100,
+           edgecolor = 'black',
+           alpha=pa.alpha1)
+
+    #############################################
+    ####### PLOT CONVEX HULL SIMPLEX ############
+    #############################################
+    # plot t0 convex hull
+    linewidth=pa.linewidth
+    if pa.t0_hull:
+        points_in = pa.p_lever_plot[0,:,:2]
+        simplex = convexhull(points_in) #-np.mean(points_in,axis=0)*2
+
+        clr='blue'
+        plot_convex_hull_function(simplex,clr,linewidth)
+
+    ###################################################
+    # PLOT T=0..30
+    points_in = pa.p_lever_plot[:,:,:2].reshape(-1,2)
+    simplex = convexhull(points_in) #-np.mean(points_in,axis=0)*2
+
+    plot_convex_hull_function(simplex,
+                              pa.hull_clr,
+                              linewidth)
+
+    ###################################################
+    # plot all points convex hull
+    if pa.plot_all==True:
+
+        points_in = pa.all_points_plot[:,:2]
+
+        # reverse KNN triage to keep just outliers
+        if False:
+            triage_value = 0.10
+            knn_triage_threshold = 100*(1-triage_value)
+
+            # print ("temp points: ", temp_points.shape)
+            idx_keep = knn_triage(knn_triage_threshold,
+                                  points_in)
+
+            idx_outliers = np.where(idx_keep==0)[0]
+            points_in = points_in[idx_outliers]
+
+        #print ("computing hull of all points...", points_in.shape)
+
+        simplex = convexhull(points_in) #-np.mean(points_in,axis=0)*2
+
+        plot_convex_hull_function(simplex,'black',linewidth)
+
+#
+def plot_convex_hull_function(simplex, clr, linewidth):
+
+    for k in range(simplex.shape[0]-1):
+        plt.plot([simplex[k,0], simplex[k+1,0]],
+                 [simplex[k,1], simplex[k+1,1]],
+                 c=clr,
+                 linewidth=linewidth
+                 )
     #
-    # if False:
-    #     plt.savefig('/home/cat/pca_all_plus_levers.png',dpi=300)
-    #     plt.close()
-    # else:
-    #     plt.show()
-    #                                    #
+    plt.plot([simplex[0,0], simplex[-1,0]],
+             [simplex[0,1], simplex[-1,1]],
+             c=clr,
+             linewidth=linewidth
+             )
+
+#
+# def plot_pca_scatter(pa,
+#                      n_frames = 30,
+#                      plot_all = True,
+#                      plot_3D=True):
+#
+#     fig =plt.figure()
+#     if plot_3D:
+#         ax = fig.add_subplot(projection='3d')
+#     else:
+#         ax =plt.subplot(111)
+#
+#     clrs = ['red','pink','yellow']
+#     cmap = matplotlib.cm.get_cmap('jet_r')
+#
+#     idx = np.arange(pa.all_points.shape[0])
+#     print (idx.shape)
+#
+#     print ("plever: ", pa.p_lever.shape)
+#     start = 0
+#     end = n_frames
+#
+#     #
+#     #for k in range(X_lever.shape[0]):
+#     for k in range(start,end,1):
+#         if plot_3D:
+#             ax.scatter(pa.p_lever[k,:,0],
+#                        pa.p_lever[k,:,1],
+#                        pa.p_lever[k,:,2],
+#                     color=cmap(k/(end-start)),
+#                     s=20,
+#                     edgecolor = 'black', alpha=.8)
+#         else:
+#             ax.scatter(pa.p_lever[k,:,0],
+#                        pa.p_lever[k,:,1],
+#                     color=cmap(k/(end-start)),
+#                     s=20,
+#                     edgecolor = 'black', alpha=.8)
+#
+#     if plot_3D:
+#
+#         if plot_all:
+#             ax.scatter(pa.all_points[idx,0],
+#                    pa.all_points[idx,1],
+#                    pa.all_points[idx,2],
+#                     c='black',
+#                     s=20,
+#                     edgecolor = 'black', alpha=.2)
+#
+#         ax.scatter(pa.p_lever[0,:,0],
+#                    pa.p_lever[0,:,1],
+#                    pa.p_lever[0,:,2],
+#                     color='red',
+#                     s=100,
+#                     edgecolor = 'black', alpha=.8)
+#
+#     else:
+#
+#         if plot_all:
+#             ax.scatter(pa.all_points[idx,0],
+#                    pa.all_points[idx,1],
+#                     c='black',
+#                     s=100,
+#                     edgecolor = 'black', alpha=.8)
+#
+#         ax.scatter(pa.p_lever[0,:,0],
+#                    pa.p_lever[0,:,1],
+#                     color='red',
+#                     s=100,
+#                     edgecolor = 'black', alpha=.8)
+#
+#     #
+#     # if False:
+#     #     plt.savefig('/home/cat/pca_all_plus_levers.png',dpi=300)
+#     #     plt.close()
+#     # else:
+#     #     plt.show()
+#     #                                    #
 
 def plot_pca_scatter_lever_and_body_movements(pa, plot_3D=True):
 
@@ -3389,7 +3605,7 @@ def plot_pca_scatter_lever_and_body_movements(pa, plot_3D=True):
 
     idx = np.arange(pa.all_points.shape[0])
 
-    print ("plever: ", pa.p_lever.shape)
+    #print ("plever: ", pa.p_lever.shape)
     start = 0
     end = 30
 
@@ -3551,6 +3767,48 @@ def get_convex_hull(pa):
              )
 
     return pa
+
+
+
+def plot_convex_hull22(pa):
+
+    t = np.arange(pa.ratio_single.shape[0])[::-1]/30.-10
+
+    ########### CUMSUM ############
+
+    plt.plot(t, pa.ratio_cumsum,
+                #s=100,
+                #edgecolor='black',
+                c='red',
+                linewidth=3,
+                label = 'Cumulative ConvexHull',
+                alpha=.8)
+
+    plt.fill_between(t, pa.ratio_cumsum,
+                     pa.ratio_cumsum*0,
+                     color='red',
+                     alpha=.05)
+
+
+    # vs random cumulative
+    mean = np.mean(pa.ratio_random_cumulative,1)
+    std = np.std(pa.ratio_random_cumulative,1)
+
+    plt.plot(t,mean,
+             linewidth=4,
+             label = 'Cumulative ConvexHull - Random',
+             c='black')
+
+    plt.fill_between(t, mean+std, mean-std,
+                     color='black',
+                     alpha=.2)
+
+
+    plt.ylim(0,1)
+    plt.xlim(t[-1],t[0])
+    plt.xlabel("Time (sec)")
+    plt.ylabel("Area under curve")
+    plt.legend()
 
 
 def plot_convex_hull(pa):
@@ -6214,6 +6472,7 @@ def plot_svm_accuracy(data_dir,animal_id, session_id):
     #
     fname = os.path.join(data_dir,
                      animal_id,
+                     'tif_files',
                      session_id,
                      "SVM_Scores_"+session_id+
                     "code_04_trial_ROItimeCourses_30sec_Xvalid10_Slidewindow30.npz")
@@ -6248,23 +6507,2163 @@ def plot_svm_accuracy(data_dir,animal_id, session_id):
     plt.xlabel("Time to lever pull (sec)")
 
 
+#####################################
+class LinearRegression(linear_model.LinearRegression):
+    """
+    LinearRegression class after sklearn's, but calculate t-statistics
+    and p-values for model coefficients (betas).
+    Additional attributes available after .fit()
+    are `t` and `p` which are of the shape (y.shape[1], X.shape[1])
+    which is (n_features, n_coefs)
+    This class sets the intercept to 0 by default, since usually we include it
+    in X.
+    """
+
+    def __init__(self, *args, **kwargs):
+        if not "fit_intercept" in kwargs:
+            kwargs['fit_intercept'] = False
+        super(LinearRegression, self)\
+                .__init__(*args, **kwargs)
+
+    def fit(self, X, y, n_jobs=1):
+        self = super(LinearRegression, self).fit(X, y, n_jobs)
+
+        sse = np.sum((self.predict(X) - y) ** 2, axis=0) / float(X.shape[0] - X.shape[1])
+        se = np.array([
+            np.sqrt(np.diagonal(sse[i] * np.linalg.inv(np.dot(X.T, X))))
+                                                    for i in range(sse.shape[0])
+                    ])
+
+        self.t = self.coef_ / se
+        self.p = 2 * (1 - stats.t.cdf(np.abs(self.t), y.shape[0] - X.shape[1]))
+        return self
+
+def compute_significance2(data,
+                     significance):
+
+    #print ("self.data: ", data.shape)
+
+    mean = data.mean(1)
+    #
+    sig = []
+    for k in range(data.shape[0]):
+        #res = stats.ks_2samp(self.data[k],
+        #                     control)
+        #res = stats.ttest_ind(first, second, axis=0, equal_var=True)
+
+        #
+        res = scipy.stats.ttest_1samp(data[k], 0.5)
+
+        sig.append(res[1])
+
+
+    sig_save = np.array(sig).copy()
+    #print ("Self sig save: ", sig_save.shape)
+
+    # multiple hypothesis test
+    temp = np.array(sig)
+    #print ("data into multi-hypothesis tes:", temp.shape)
+    temp2 = multipletests(temp, alpha=significance, method='fdr_bh')
+    sig = temp2[1]
+
+    #
+    sig=np.array(sig)[None]
+
+    #
+    thresh = significance
+    idx = np.where(sig>thresh)
+    sig[idx] = np.nan
+
+    #
+    idx = np.where(mean<0.5)
+    sig[:,idx] = np.nan
+    #print ("SIG: ", sig.shape)
+
+    # find earliest
+    earliest_continuous = 0
+    for k in range(sig.shape[1]-1,0,-1):
+        if sig[0][k]<=significance:
+            earliest_continuous = k
+        else:
+            break
+
+    earliest_continuous = -(sig.shape[1]-earliest_continuous)/30.
+
+    return sig, earliest_continuous
+
+#
+def plot_longitudinal_svm_accuracy_concatenated_sessions(root_dir,
+                                                         names):
+    #
+    fig = plt.subplots(figsize=(20,10))
+    animal_ids = ["M1", "M2", "M3", "M4","M5",'M6']
+
+    #
+    smooth = True
+    smooth_window = 30
+    significance = 0.05
+    #auc = []
+    #early = []
+    #from tqdm import tqdm, trange
+    for k, name in enumerate(names):
+        fnames = np.loadtxt(os.path.join(root_dir,name,
+                                         'concatenated_svm.txt'),dtype='str')
+
+        ax=plt.subplot(2,3,k+1)
+        colors = plt.cm.viridis(np.linspace(0,1,len(fnames)))
+
+        #
+        fname_accs = os.path.join(root_dir,name,
+                                         'acc_all_sessions_smooth.npy')
+        fname_edts = os.path.join(root_dir,name,
+                                         'edts_all_sessions_smooth.npy')
+        fname_aucs = os.path.join(root_dir,name,
+                                         'aucs_all_sessions_smooth.npy')
+        acc_array = []
+        edts_array = []
+        auc_array = []
+        if os.path.exists(fname_accs):
+            acc_array = np.load(fname_accs)
+
+             ##############################
+            #
+            for ctr,acc in enumerate(acc_array):
+                mean = acc.mean(1)
+                t = np.arange(mean.shape[0])/30-28
+                ax.plot(t,mean,
+                        linewidth=2,
+                        color=colors[ctr])
+
+        else:
+            for ctr,fname in tqdm(enumerate(fnames)):
+
+                #
+                data = np.load(fname, allow_pickle=True)
+                acc = data['accuracy']
+
+                #print ('acc: ', acc.shape)
+                if smooth:
+                    data = []
+                    for p in range(acc.shape[1]):
+                        box = np.ones(smooth_window)/smooth_window
+
+                        trace_smooth = np.convolve(acc[:,p],
+                                                   box,
+                                                   mode='valid')
+
+                        data.append(trace_smooth)
+                    data = np.array(data)
+                    acc = np.array(data).copy().T
+
+                acc_array.append(acc)
+
+                ##############################
+                #
+                mean = acc.mean(1)
+                t = np.arange(mean.shape[0])/30-28
+                #print ("t.shape,", t.shape, 't: ', t[:10])
+                ax.plot(t,mean,
+                        linewidth=2,
+                        color=colors[ctr])
+
+                # append area under cruve up to t = -10sec
+                temp = mean[-300:]  # last 10sec prior to movement
+                auc_array.append(temp.sum())
+
+                sig, earliest = compute_significance2(data.T,
+                                                     significance)
+                edts_array.append(earliest)
+
+
+            np.save(fname_accs, acc_array)
+            np.save(fname_edts, edts_array)
+            np.save(fname_aucs, auc_array)
+
+        plt.ylim(0.4,1.0)
+        plt.xlim(-15,0)
+        plt.plot([-30,0],[0.5,0.5],'--',c='black')
+
+        #
+        plt.xlabel("Time (sec)")
+        plt.ylabel("SVM accuracy")
+        plt.title(animal_ids[k])
+
+
+def plot_edts_longitudinal(root_dir, animal_ids):
+
+    colors = ['black','blue','red','green','magenta','pink','cyan']
+    fig=plt.figure(figsize=(6,6))
+    names_biorxiv = ["M1", "M2", "M3", "M4","M5",'M6']
+
+    #
+    for k in range(len(animal_ids)):
+
+        ax=plt.subplot(3,2,k+1)
+
+        edts = np.load(os.path.join(root_dir,animal_ids[k],
+                                   'edts_all_sessions_smooth.npy'))
+
+        #temp = np.array(early[k])
+        temp = edts
+
+        #
+        idx =np.where(temp<-20)[0]
+        temp[idx]=temp[idx-1]
+        t = np.arange(temp.shape[0])/temp.shape[0]
+
+        #
+        lr = LinearRegression()
+        lr.fit(t.reshape(-1, 1), temp.reshape(-1, 1))
+
+        #
+        temp2 = np.poly1d(np.polyfit(t, temp, 1))(t)
+        plt.plot(t, temp2,
+                 linewidth=6,
+                 #label=ids[k]+ " ***** ",
+                 c='black')
+
+        #
+        corr = scipy.stats.pearsonr(t,temp)
+        print ("corrL: ", corr)
+
+        plt.scatter(t,
+                    temp,
+                    #label=names[k]+ " "+str(round(corr[0],2))+
+                    #                        " ("+str("pval: {0:.1}".format(corr[1]))+")",
+                    s=100,
+                    #linewidth=4,
+                    c='grey',
+                    alpha=.8,
+                   label = str(round(corr[0],2)))
+        #t = np.arange(auc1.shape[0])/(auc1.shape[0]-1)
+
+        plt.xticks([])
+        #plt.yticks([])
+        legend = plt.legend(handlelength=0, fontsize=12)
+
+        #plt.legend(fontsize=12)
+        plt.ylim(-12,0)
+        plt.xlim(0,1)
+        plt.title(names_biorxiv[k])
+
+#
+def generate_convex_hulls(pa):
+
+    #pa.plot_all = True
+    pa.plot_3D = False
+    pa.alpha1 = 1.0
+    pa.alpha2 = 0.02
+    pa.knn_triage = .1
+    pa.knn_triage_based_on_last_point = False           # this flag removes all traces based on t=0 triaging
+                                                        # basically we use the outliers at t=0 to triage other time points;
+    pa.cmap = matplotlib.cm.get_cmap('jet')
+    pa.linewidth = 5
+    pa.t0_hull = False
+    pa.t0_dynamics = False
+    pa.plot_dynamics = False
+
+    #############################
+    plot_pca_scatter(pa)
+
+    #plt.title(session+ " triage: "+ (str(pa.knn_triage)))
+
+
+def plot_convex_hulls_10sec(root_dir, animal_id, session):
+#
+
+    #
+    t1 = np.arange(30,310,10)
+    t2 = np.arange(0,270,10)
+
+    #
+    cmap = matplotlib.cm.get_cmap('Reds', len(t1))
+
+    #
+    plt.figure(figsize=(10,10))
+
+    #
+    fname_all_points = os.path.join(root_dir, animal_id,
+                                    'tif_files',
+                                    session,
+                             'pa_all_points.npy')
+    fname_p_lever = os.path.join(root_dir, animal_id,
+                                 'tif_files',
+                                 session,
+                               'pa_p_lever.npy')
+
+    pa_all_points = np.load(fname_all_points)
+    pa_p_lever = np.load(fname_p_lever)
+    #pa_all_points = []
+    #pa_p_lever = []
+    ctr=0
+    for t1,t2 in zip(t1,t2):
+        #print ("Times: ", t1,t2)
+
+        pa = PCA_Analysis()
+        pa.root_dir = root_dir #'/media/cat/4TBSSD/yuki/'
+        pa.animal_id = animal_id
+
+        #
+        pa.use_pca_data = True    # this uses the PCA denoised STMs not Raw data!
+        pa.recompute = True
+        pa.n_pca = 20
+        pa.sliding_window = 30    # how many frames to take into analysis window
+        pa.n_frames = 30          # how many frames back in time to analyze:
+        pa.session = session
+
+        # #
+        # pa.X, pa.triggers = get_data_and_triggers(pa)
+        #
+        # #
+        # pa.pca, pa.all_points = get_pca_object_and_all_points(pa)
+        #
+        # #
+        # pa_all_points.append(pa.all_points)
+
+        pa.all_points = pa_all_points[ctr]
+
+        #
+        pa.t1 = t1
+        pa.t2 = t2
+        # pa.p_lever = project_data_pca2(pa)
+        #
+        # pa_p_lever.append(pa.p_lever)
+
+        pa.p_lever = pa_p_lever[ctr]
+        if t1 ==30:
+            pa.plot_all=True
+        else:
+            pa.plot_all=False
+
+        pa.hull_clr = cmap(ctr)
+
+        #
+        generate_convex_hulls(pa)
+
+        ctr+=1
+
+    #
+    np.save(fname_all_points, pa_all_points)
+    np.save(fname_p_lever, pa_p_lever)
+
+
+def plot_area_under_curve_1sec_segments(root_dir,
+                                       animal_id,
+                                       session):
+    #
+    pa = PCA_Analysis()
+    pa.root_dir = root_dir
+    pa.animal_id = animal_id
+    pa.session = session
+
+    #
+    pa.use_pca_data = True    # this uses the PCA denoised STMs not Raw data!
+    pa.recompute = True
+    pa.n_pca = 20
+    pa.sliding_window = 30    # how many frames to take into analysis window
+    pa.n_frames = 300          # how many frames back in time to analyze:
+
+    #
+    pa.t1 = 300
+    pa.t2 = 270
+
+    #
+    pa.t0_hull = False
+    pa.t0_dynamics = False
+    pa.plot_dynamics = False
+
+    data = np.load(os.path.join(root_dir, animal_id,
+                                'tif_files',
+                                session,
+                                session+"_convex_hull.npz"),allow_pickle=True)
+
+    #
+    pa.ratio_cumsum = data['ratio_cumsum']
+    pa.ratio_random_cumulative = data['ratio_random_cumulative']
+    pa.ratio_random_single = data['ratio_random_single']
+    pa.ratio_single = data['ratio_single']
+
+    #
+    plot_convex_hull22(pa)
+
+
+def get_aucs_norms():
+    animal_ids = ['IA1','IA2','IA3','IJ1',"IJ2","AQ2"]
+    clrs = ['black','blue','red','green','magenta','pink']
+
+    aucs = []
+    aucs_norm = []
+
+    plotting = False
+    for ctr_animal, animal_id in enumerate(animal_ids):
+
+        #
+        aucs.append([])
+        aucs_norm.append([])
+
+        #
+        pa = PCA_Analysis()
+        pa.root_dir = '/media/cat/4TBSSD/yuki/'
+        pa.session_id = 'all'
+        pa.animal_id = animal_id
+
+        #
+        sessions = get_sessions(pa.root_dir,
+                         pa.animal_id,
+                         pa.session_id)
+        #
+        cmap = matplotlib.cm.get_cmap('Reds')
+
+        clr_ctr=0
+        n_sessions = len(sessions)
+        alpha = .5
+
+        if plotting:
+            fig=plt.figure(figsize=(7,5))
+        for session in sessions:
+            print ('session:', session)
+            #
+            fname = os.path.join(pa.root_dir, pa.animal_id,'tif_files',session,
+                                session+ '_convex_hull.npz')
+
+            try:
+                d = np.load(fname, allow_pickle = True)
+            except:
+                clr_ctr+=1
+                continue
+
+            pa.ratio_single = d['ratio_single'][::-1]
+            pa.ratio_cumsum = d['ratio_cumsum'][::-1]
+            pa.ratio_random_single = d['ratio_random_single'][::-1]
+            pa.ratio_random_cumulative = d['ratio_random_cumulative'][::-1]
+
+            clr_ctr+=1
+
+            #
+            aucs[ctr_animal].append(pa.ratio_cumsum.sum())
+            aucs_norm[ctr_animal].append((pa.ratio_cumsum/np.max(pa.ratio_cumsum)).sum())
+
+
+    return aucs_norm
+
+
+def plot_longitudinal_area_under_curve(root_dir,
+                                       animal_ids):
+    #
+    from sklearn.linear_model import LinearRegression as LR2
+
+    aucs_norm = np.load(os.path.join(root_dir,'aucs_norm.npy'),allow_pickle=True)
+
+    #
+    fig=plt.figure(figsize=(6,6))
+    for k in range(len(aucs_norm)):
+        plt.subplot(3,2,k+1)
+
+        #
+        temp = aucs_norm[k]
+        plt.scatter(np.arange(len(temp)), temp,
+                    c='red',
+                    edgecolor='black',
+                    s=100,
+                    alpha=.5)
+
+        x = np.arange(len(temp))
+        corr = scipy.stats.pearsonr(x,temp)
+        print ("cor: ", corr)
+
+        # fit
+        model = LR2()
+        y = np.array(temp).reshape(-1, 1)
+        x = np.arange(y.shape[0]).reshape(-1, 1)
+        model.fit(x, y)
+
+        x2 = np.arange(0,y.shape[0],1).reshape(-1, 1)
+        y_pred = model.intercept_ + model.coef_ * x2
+
+        plt.plot(x2, y_pred, label= str(round(corr[0],2)),
+                 c='black',
+                 linewidth=6)
+
+
+
+        plt.legend(handlelength=0, fontsize=16)
+        plt.xlim(x[0],x[-1])
+        plt.ylim(np.min(y), np.max(y))
+        #print (" COMPUTE PEARSON CORR NOT T-TEST ON FIT")
+        #print (np.min(y), np.max(y))
+        #plt.ylim(0,2)
+
+        plt.xticks([])
+        plt.yticks([])
+
+def plot_longitudinal_lever_hull(root_dir, animal_names):
+
+    from sklearn.linear_model import LinearRegression as LR2
+
+    animal_ids = np.arange(len(animal_names))
+    names_biorxiv = ["M1", "M2", "M3", "M4","M5",'M6']
+
+    areas = np.load(os.path.join(root_dir,
+                                 'hull_areas.npy'),allow_pickle=True)
+    overlaps = np.load(os.path.join(root_dir,
+                                 'hull_overlaps.npy'),allow_pickle=True)
+
+    fig=plt.figure(figsize=(6,6))
+    clr='magenta'
+    for animal_id in animal_ids:
+        ax = plt.subplot(3,2,animal_id+1)
+        ctr=0
+        data=[]
+        for k in range(len(areas[animal_id])):
+            flag = False
+            try:
+                area_right = areas[animal_id][k][2]
+                area_all = areas[animal_id][k][3]
+                temp = area_right/area_all
+                if np.isnan(temp)==False:
+                    plt.scatter(ctr, temp,
+                                s=100,
+                                c=clr,
+                               alpha=.6)
+                    ctr+=1
+                    data.append([ctr,temp])
+            except:
+                pass
+
+            #print (k, ctr)
+
+        #
+        data = np.array(data)
+        #print ("data: ", data.shape)
+
+        # fit line
+        x = data[:,0]
+        y = data[:,1]
+        corr = scipy.stats.pearsonr(x,y)
+        print (animal_id, "cor: ", corr)
+
+
+        # fit
+        model = LR2()
+        y=np.array(y).reshape(-1, 1)
+        x = np.arange(y.shape[0]).reshape(-1, 1)
+        model.fit(x, y)
+
+        x2 = np.arange(0,y.shape[0],1).reshape(-1, 1)
+        y_pred = model.intercept_ + model.coef_ * x2
+
+
+        plt.plot(x2, y_pred, label= str(round(corr[0],2)),
+                 c='black',
+                 linewidth=6)
+
+
+        legend = plt.legend(handlelength=0, fontsize=16)
+        #plt.legend(fontsize=12)
+        plt.xlim(x[0],x[-1])
+        plt.ylim(np.min(y), np.max(y))
+        #print (" COMPUTE PEARSON CORR NOT T-TEST ON FIT")
+        #print (np.min(y), np.max(y))
+        #plt.ylim(0,2)
+
+        plt.xticks([])
+        plt.yticks([])
+        plt.ylim(0,0.5)
+
+        #print (k, ctr)
+        plt.title(names_biorxiv[animal_id])
+
+
+
+def plot_longitudinal_right_paw_intersection_lever(root_dir, animal_names):
+
+    from sklearn.linear_model import LinearRegression as LR2
+
+    animal_ids = np.arange(len(animal_names))
+    names_biorxiv = ["M1", "M2", "M3", "M4","M5",'M6']
+
+    areas = np.load(os.path.join(root_dir,
+                                 'hull_areas.npy'),allow_pickle=True)
+    overlaps = np.load(os.path.join(root_dir,
+                                 'hull_overlaps.npy'),allow_pickle=True)
+
+    clr='brown'
+    plt.figure(figsize=(6,6))
+    for animal_id in animal_ids:
+        ax=plt.subplot(3,2,animal_id+1)
+        ctr=0
+        data= []
+        for k in range(len(overlaps[animal_id])):
+            #ax = plt.subplot(2,2,a+1)
+            try:
+                temp = overlaps[animal_id][k]
+                if np.isnan(temp)==False:
+                    plt.scatter(ctr, temp,
+                                s=100,
+                                c=clr,
+                               alpha=.6)
+                    ctr+=1
+                    data.append([ctr,temp])
+            except:
+                pass
+
+        #
+        data = np.array(data)
+
+        # fit line
+        x = data[:,0]
+        y = data[:,1]
+        corr = scipy.stats.pearsonr(x,y)
+        print ("cor: ", corr)
+
+
+        # fit
+        model = LR2()
+        y=np.array(y).reshape(-1, 1)
+        x = np.arange(y.shape[0]).reshape(-1, 1)
+        model.fit(x, y)
+
+        x2 = np.arange(0,y.shape[0],1).reshape(-1, 1)
+        y_pred = model.intercept_ + model.coef_ * x2
+
+
+        plt.plot(x2, y_pred, label= str(round(corr[0],2)),
+                 c='black',
+                 linewidth=6)
+
+
+        plt.legend(handlelength=0, fontsize=16)
+        plt.xlim(x[0],x[-1])
+        plt.ylim(np.min(y), np.max(y))
+
+        plt.xticks([])
+        plt.yticks([])
+        plt.ylim(0,1)
+        plt.title(names_biorxiv[animal_id])
+
+#
+def find_first_variance_decrease_point2(data_in, s1, e1, std_factor, ctr,
+                                       animal_id,
+                                       n_vals_below_thresh=30):
+
+    #
+    if False:
+    #if ctr!=3:
+        data_in = savgol_filter(data_in, 31, 2)
+
+    # find std of up to 10 sec prior to pull
+    std = np.std(data_in[s1:e1], axis=0)
+
+    # find mean up to 10 sec prior to pull
+    mean2 = np.mean(data_in[0:e1], axis=0)
+
+    # do rolling evalution to find location when next N vals are belw threhsold
+    idx_out = np.nan
+    #n_vals_below_thresh = 30
+    window = [20*30,30*30 ]
+    for k in range(window[0],
+                   window[1], 1):
+        # ensure that several time points in a row are below
+        temp = data_in[k:k+n_vals_below_thresh]
+        #print ("TEMP: ", temp)
+        #print ("mean2: ", mean2)
+        #print ("std*std_factor[ctr]: ", std*std_factor[ctr])
+        if animal_id !='IA2':
+            if np.all(temp<=(mean2-std*std_factor[ctr])):
+                idx_out = k
+                break
+        else:
+            if np.all(temp>=(mean2+std*std_factor[ctr])):
+                idx_out = k
+                break
+
+    #
+    if idx_out>(900-30//2):
+        idx_out=np.nan
+
+    return idx_out
+
+#
+def plot_all_variances(root_dir,
+                      animal_id):
+    from scipy import signal
+
+    #
+    data = np.load(os.path.join(root_dir,
+                                animal_id,
+                                animal_id+"_variances.npz"))
+
+    all_means = data['all_means']
+    all_vars = data['all_vars']
+    saved_names = data['saved_names']
+
+    #
+    session_ids = np.arange(len(all_vars))
+
+    #
+    roi_ids = [15,5,9,11,1]
+    colors = plt.cm.viridis(np.linspace(0,1,len(all_vars)))
+
+    ###############################################
+    ###############################################
+    ###############################################
+    plot_varsS = [False, True]
+
+    for plot_vars in plot_varsS:
+
+        #
+        plt.figure(figsize=(20,4))
+        std_factor = [2,2,2,4,2]
+        n_vals = [10,15,20,20,20,30]
+        first_decay = []
+
+        # plot first decay point
+        s1 = 400
+        e1 = 600
+
+        #
+        for ctr, roi_id in enumerate(roi_ids):
+
+            first_decay.append([])
+
+            #
+            plt.subplot(1,5,ctr+1)
+            all_ = []
+            for ctr_sess, session_id in enumerate(session_ids):
+                if plot_vars:
+                    temp = all_vars[session_id][roi_id].copy()
+                else:
+                    temp = all_means[session_id][roi_id].copy()
+                t = np.arange(temp.shape[0])/30.-30
+
+                #
+                if False:
+                    temp = savgol_filter(temp, 31, 2)
+
+                else:
+                    fs = 30
+                    fc = 5  # Cut-off frequency of the filter
+
+                    w = fc / (fs / 2) # Normalize the frequency
+                    b, a = signal.butter(5, w, 'low')
+                    temp = signal.filtfilt(b, a, temp)
+
+                #
+                plt.plot(t, temp,
+                         color=colors[ctr_sess],
+                         alpha=.5,
+                         linewidth=3)
+
+                idx = find_first_variance_decrease_point2(temp, s1, e1, std_factor, ctr,
+                                                         animal_id,
+                                                         n_vals[ctr])
+
+                first_decay[ctr].append(idx)
+
+                all_.append(temp)
+
+            #
+            a = np.array(all_)
+
+            if False:
+                a = savgol_filter(a, 31, 2)
+
+            a_mean = np.mean(a,axis=0)
+            plt.plot(t, a_mean,c='red',
+                     linewidth=5,
+                     alpha=1)
+
+
+            plt.xlim(-15,5)
+
+            #
+            if plot_vars:
+                #plt.ylim(bottom=0)
+                plt.ylim(0,0.01)
+                plt.plot([-30,30],[0,0],'--',c='grey')
+                plt.plot([0,0],[-.2,.2],'--',c='grey')
+            else:
+                plt.ylim(-.075,.15)
+                plt.plot([-30,30],[0,0],'--',c='grey')
+                plt.plot([0,0],[-.2,.2],'--',c='grey')
+            plt.title(saved_names[roi_id],fontsize=8)
+            if ctr==0:
+                if plot_vars:
+                    plt.ylabel("Variance")
+                else:
+                    plt.ylabel("DF/F")
+            plt.xlabel("Time (sec)")
+
+        plt.suptitle(animal_id)
+
+def plot_first_decay_time(root_dir, animal_id):
+
+        #
+    first_decay = np.load(os.path.join(root_dir,
+                                animal_id,
+                                animal_id+"_first_decay.npy"))
+    labels = ['retrosplenial', 'barrel', 'limb', 'motor']
+
+    #
+    clrs_local = ['magenta','brown','pink','darkblue', 'blue']
+
+    #
+    d1 = []
+    idx = [0,1,2,4]  # drop visual from these plots
+    for k in idx:
+        #temp = (np.array(first_decay[k])+700)/30-30
+        temp = (np.array(first_decay[k]))/30-30
+        idx = np.where(np.isnan(temp)==False)[0]
+        temp = temp[idx]
+
+        #print (k, "Times: ", temp)
+        d1.append(temp)
+
+
+    plt.figure(figsize=(10,10))
+    my_dict = dict(
+                   retrosplenial = d1[0],
+                   barrel = d1[1],
+                   somatosensory = d1[2],
+                   #v = d1[3],
+                   motor = d1[3]
+               )
+
+    data = pd.DataFrame.from_dict(my_dict, orient='index')
+    data = data.transpose()
+
+    #
+    flierprops = dict(marker='o',
+                      #markerfacecolor='g',
+                      #markersize=10000,
+                      linestyle='none',
+                      markeredgecolor='r')
+
+    #
+    data.boxplot(showfliers=False,
+                flierprops=flierprops,
+                grid=False)
+
+    #
+    for i,d in enumerate(d1):
+        y = d1[i]
+        x = np.random.normal(i+1, 0.04, len(y))
+
+        #
+        x = np.random.normal(i+1, 0.04, len(d1[i]))
+
+        #
+        plt.scatter(x,
+                    d1[i],
+                    c=clrs_local[i],
+                    #c=colors,
+                    edgecolor='black',
+                    s=200,
+                    label=labels[i],
+                    alpha=.5
+                   )
+
+    plt.ylim(-10,0)
+    plt.xlim(0.5,4.5)
+    plt.plot([0,6],[-3,-3],'--')
+    plt.plot([0,6],[-5,-5],'--')
+    plt.xticks([])
+
+    plt.legend()
+
+
+
+def get_data_pie_charts(n_sec_lockout,
+                        body_feats_lockout,
+                        animal_id,
+                        root_dir):
+
+    # skip 1,2,3 n-sec-lockouts and the empty lockouts
+    if len(body_feats_lockout)==0:    # if not using any lockout window
+        if n_sec_lockout in [1,2, 3]:  #
+            return [], [], []
+
+
+    #
+    fname = os.path.join(root_dir,
+                         animal_id,
+                         'super_sessions',
+                         'alldata_body_and_nonreward_lockout_'+str(n_sec_lockout)+'secLockout_'+
+                         str(body_feats_lockout)+'bodyfeats.npz')
+
+    #
+    data = np.load(fname, allow_pickle=True)
+
+    #
+    trials = data['trials']
+
+    #
+    behaviors = data['behaviors']
+
+    #
+    names = data['names']
+
+
+    return trials, names, behaviors
+
+
+
+
+
+def compute_lockout_single_animal(root_dir,animal_ids):
+
+    from tqdm import tqdm
+
+    #
+    n_sec_lockouts = [0,1,2,3,6,9,12,15,18,21,24,27,30]
+
+    #
+    body_feats_lockouts = [[],[0],[5]]
+
+    #
+    labels = ['all', 'left paw', 'licking']
+
+    clrs = ['black','red','green']
+
+    #
+    fig=plt.figure()
+    ctr2 = 0
+
+    #
+    for ctr_animal, animal_id in enumerate(animal_ids):
+        rewarded_array = np.load(os.path.join(root_dir,
+                                           animal_id,
+                                           'rewarded_array_'+animal_id+'.npy'),allow_pickle=True)
+        nSec_array = np.load(os.path.join(root_dir,
+                                           animal_id,
+                                           'nSec_array_'+animal_id+'.npy'),allow_pickle=True)
+
+        #
+        ax=plt.subplot(1,1,1)
+
+        #
+        ctr=0
+
+
+
+        #
+        for cx, body_feats_lockout in enumerate(body_feats_lockouts):
+
+            rewarded = rewarded_array[cx]
+            nSec = nSec_array[cx]
+
+            if nSec[0]==3:
+                ntemp_rew = []
+                ntemp_sec = []
+                for k in range(3):
+                    ntemp_rew.append(rewarded[0])
+                    ntemp_sec.append(k)
+
+                ntemp_sec.append(nSec)
+                ntemp_rew.append(rewarded)
+
+                nSec = np.hstack(ntemp_sec)
+                rewarded = np.hstack(ntemp_rew)
+
+            rewarded = np.hstack(rewarded)
+            #rewarded = rewarded/1351
+            plt.plot(nSec,
+                     rewarded,
+                     c=clrs[ctr],
+                     label=labels[ctr],
+                    linewidth=5)
+
+            #all_array[ctr_animal].append(rewarded)
+
+            ctr+=1
+
+        plt.legend()
+        plt.xlim(0,20)
+        plt.ylim(bottom=0.01)
+        ctr2+=1
+
+    plt.xlabel("# of seconds of lockout")
+    plt.ylabel("# of trials")
+
+def plot_all_lockouts_all_animals(root_dir):
+
+    all_array = np.load(os.path.join(root_dir,
+                                     'all_array.npy'),allow_pickle=True)
+
+    #
+    clrs = ['black','red','green']
+    #
+    rew_all = []
+    for k in range(6):
+        temp = all_array[k][0]
+        #temp = temp/np.max(temp)
+        rew_all.append(temp)
+
+    rew_all = np.vstack(rew_all)
+    rew_all = rew_all[:,1:]
+    x = np.array([1,2,3,6,9,12,15,18,21,24,27,30])
+
+    #
+    if False:
+        mean = np.mean(rew_all, axis=0)
+        std = np.std(rew_all, axis=0)
+        plt.plot(x,
+                 mean,
+                 color=clrs[0],
+                 linewidth=5)
+
+        plt.fill_between(x, mean+std, mean-std,
+                         color=clrs[0], alpha=.1)
+    else:
+        mean = np.mean(rew_all, axis=0)
+        std = np.std(rew_all, axis=0)
+        plt.plot(x,
+                 mean,
+                 color=clrs[0],
+                 linewidth=5)
+        for p in range(6):
+            plt.scatter(x,rew_all[p],
+                       c=clrs[0],
+                        edgecolor='black',
+                       alpha=.8)
+
+    # ######################################################
+    x = np.array([1,2,3,6,9,12,15,18,21,24,27,30])
+
+    rew_all = []
+    for k in range(6):
+        temp = np.zeros(x.shape[0])
+        temp2 = all_array[k][1]
+        #temp2 = temp2/np.max(temp2)
+        #print (temp2.shape)
+        temp[:temp2.shape[0]]=temp2
+
+        rew_all.append(temp)
+
+    rew_all = np.vstack(rew_all)
+
+    #
+    if False:
+        mean = np.mean(rew_all, axis=0)
+        std = np.std(rew_all, axis=0)
+        plt.plot(x,
+             mean,
+                 color=clrs[1],
+             linewidth=5)
+
+        plt.fill_between(x, mean+std, mean-std,
+                         color=clrs[1], alpha=.1)
+    else:
+        mean = np.mean(rew_all, axis=0)
+        std = np.std(rew_all, axis=0)
+        plt.plot(x,
+             mean,
+                 color=clrs[1],
+             linewidth=5)
+        for p in range(6):
+            plt.scatter(x,rew_all[p],
+                       c=clrs[1],
+                        edgecolor='black',
+                       alpha=.8)
+
+    # ######################################################
+    x = np.array([1,2,3,6,9,12,15,18,21,24,27,30])
+
+    rew_all = []
+    for k in range(6):
+        temp = np.zeros(x.shape[0])
+        temp2 = all_array[k][2]
+        #temp2 = temp2/np.max(temp2)
+        #print (temp2.shape)
+        temp[:temp2.shape[0]]=temp2
+
+        rew_all.append(temp)
+
+    rew_all = np.vstack(rew_all)
+
+    #
+    mean = np.mean(rew_all, axis=0)
+    std = np.std(rew_all, axis=0)
+    plt.plot(x,
+         mean,
+             color=clrs[2],
+         linewidth=5)
+
+    for p in range(6):
+        plt.scatter(x,rew_all[p],
+                   c=clrs[2],
+                    edgecolor='black',
+                   alpha=.8)
+
+    #
+    plt.plot([3,3],[0,10000],'--',c='black')
+    plt.semilogy()
+    plt.fill_between(x, np.zeros(x.shape[0]), np.zeros(x.shape[0])+200,
+                         color='black', alpha=.05)
+    plt.xlim(0,20)
+
+    #plt.legend()
+    plt.ylim(bottom=1)
+    plt.xlabel("# of seconds of lockout")
+    plt.ylabel("# of trials")
+
+#
+def plot_no_of_hrs_of_recordings_vs_no_of_trials(root_dir):
+    animal_ids = ['IA1','IA2','IA3','IJ1','IJ2','AQ2']
+    animal_names = ['M1','M2','M3','M4','M5','M6']
+
+    hrs_array = np.load(os.path.join(root_dir,
+                                     'hrs_array.npy'),allow_pickle=True)
+    rew_array = np.load(os.path.join(root_dir,
+                                     'rew_array.npy'),allow_pickle=True)
+
+    #
+    plt.figure()
+    ax1=plt.subplot(111)
+    ax2 = ax1.twinx()
+    for ctr, animal_id in enumerate(animal_ids):
+       # n_hrs, n_rew = get_no_of_hours(root_dir,animal_id)
+
+        n_hrs = hrs_array[ctr]
+        n_rew = rew_array[ctr]
+
+        n_hrs = n_hrs*22/60.
+
+        ax1.scatter(ctr, n_hrs, c='black',
+                    s=200,
+                    label=animal_id)
+
+        ax2.scatter(ctr, n_rew, c='blue',
+                    s=200,
+                    label=animal_id)
+
+
+    #
+    ax1.set_ylabel("# of hours of recording")
+    ax2.set_ylabel("# of rewarded pulls")
+    plt.xticks(np.arange(6), animal_names)
+    ax1.set_ylim(0,45)
+    ax2.set_ylim(0,7500)
+
+def plot_pie_charts_behaviors(root_dir, animal_id):
+    all_rewarded = []
+    plotting=True
+
+    # trials = np.load(os.path.join(root_dir, animal_id,
+    #                               animal_id+'_trials.npy'),allow_pickle=True)
+    # names = np.load(os.path.join(root_dir, animal_id,
+    #                               animal_id+'_trials_names.npy'),allow_pickle=True)
+    behaviors = np.load(os.path.join(root_dir, animal_id,
+                                  animal_id+'_behaviors.npy'),allow_pickle=True)
+
+
+    # get # rewarded pulls:
+    n_rew = 0
+    n_nonrew = 0
+    n_left_paw = 0
+    n_right_paw = 0
+    n_licking = 0
+
+    #
+    feat_rew = 0
+    feat_nonrew = 1
+    feat_left_paw = 2
+    feat_right_paw = 3
+    feat_licking = 7
+
+    n_sess = 0
+    min_quiescence = 30 # in frame times
+    for sess in trange(len(behaviors)):
+        try:
+            if len(behaviors[sess][feat_left_paw])>0:
+                n_rew+= behaviors[sess][feat_rew].shape[0]
+                n_nonrew+= behaviors[sess][feat_nonrew].shape[0]
+
+                # left paw
+                temp = behaviors[sess][feat_left_paw]
+                diff = temp[1:]-temp[:-1]
+                #print (diff)
+                idx = np.where(diff>=min_quiescence)[0]
+                n_left_paw+= idx.shape[0]
+
+                # left paw
+                temp = behaviors[sess][feat_right_paw]
+                diff = temp[1:]-temp[:-1]
+                idx = np.where(diff>=min_quiescence)[0]
+                n_right_paw+= idx.shape[0]
+
+                # left paw
+                temp = behaviors[sess][feat_licking]
+                diff = temp[1:]-temp[:-1]
+                idx = np.where(diff>=min_quiescence)[0]
+                n_licking+= idx.shape[0]
+            n_sess+=1
+
+        except:
+            pass
+
+    sizes = np.array([n_rew, n_nonrew, n_left_paw, n_right_paw, n_licking])
+    sizes = sizes/np.sum(sizes)*100
+
+    # Pie chart, where the slices will be ordered and plotted counter-clockwise:
+    labels = ['rewarded lever pulls','non-rewarded lever pulls','left paw','right paw', 'licking']
+
+    #
+    all_rewarded.append(sizes[0])
+
+    #
+    if plotting:
+
+        fig1, ax1 = plt.subplots()
+        colors = ['blue','lightgrey','wheat','paleturquoise','pink']
+        patches, texts,_ = ax1.pie(sizes,
+                                #explode=explode,
+                                #labels=labels,
+                                colors=colors,
+                                autopct='%1.1f%%',
+                                #shadow=True,
+                                pctdistance=1.1,
+                                labeldistance=1.2,
+                                startangle=180,
+                                textprops={'fontsize': 20}
+                               )
+
+        #patches[0][0].set_alpha(.1)
+
+        labels = [f'{l}, {s:0.1f}%' for l, s in zip(labels, sizes)]
+
+        ax1.legend(patches, labels, loc="best")
+
+        # Set aspect ratio to be equal so that pie is drawn as a circle.
+        ax1.axis('equal')
+        plt.tight_layout()
+        plt.title(animal_id)
+        #
+
+#
+def plot_all_animal_lever_pulls_percentages(root_dir, animal_ids):
+    animal_names = ['M1','M2','M3','M4','M5','M6']
+
+    all_rewarded = np.load(os.path.join(root_dir,
+                                        'all_rewarded_percentages.npy'),allow_pickle=True)
+    #
+    fig=plt.figure()
+    ax1=plt.subplot(111)
+    for ctr, animal_id in enumerate(animal_ids):
+        n_hrs = all_rewarded[ctr]
+        ax1.scatter(ctr, n_hrs, c='blue',
+                    s=200,
+                    label=animal_id)
+
+    #
+    plt.plot([0,6],[np.mean(all_rewarded),np.mean(all_rewarded)],'--')
+    ax1.set_ylabel("% behaviors == lever pulls")
+    plt.xticks(np.arange(6), animal_names)
+    ax1.set_ylim(0,10)
+
+
+def plot_svm_accuracy_with_lockouts(root_dir):
+
+    import pandas as pd
+    from scipy import stats
+    import matplotlib.patches as mpatches
+
+
+    #
+    def box_plots(edts,
+                 licking_flag=False):
+
+        pvals = [0.05,0.01,0.001,0.0001,0.00001]
+
+        clrs_local = ['magenta','brown','pink','lightblue','darkblue', 'blue']
+
+        #
+        if licking_flag==False:
+            my_dict = dict(three = edts[0][1],
+                       six = edts[1][1],
+                       nine = edts[2][1],
+                       twelve = edts[3][1],
+                       fifteen = edts[4][1],
+                      #All = edts[5]+15,
+                     )
+        else:
+            my_dict = dict(one = edts[0][1],
+                   two = edts[1][1],
+                   three = edts[2][1],
+                   six = edts[3][1],
+                   #nine = edts[4][1],
+                   #twelve = edts[3][1],
+                   #fifteen = edts[4][1],
+                  #All = edts[5]+15,
+                 )
+
+        cmap = plt.cm.get_cmap('Reds', len(my_dict))    # 11 discrete colors
+
+
+        #
+        data = pd.DataFrame.from_dict(my_dict, orient='index')
+        data = data.transpose()
+
+        #print ("DATA: ", data.shape)
+        #print ("means: ", np.mean(data,0))
+        means =np.mean(data,0)
+        #########################################################
+        ################## SCATTER PLOTS ########################
+        #########################################################
+        for i,d in enumerate(data):
+            y = data[d]
+            x = np.random.normal(i+1, 0.04, len(y))
+            #print (x)
+            #print (y)
+            if licking_flag==False:
+                plt.scatter(x,y,
+                       c=clrs_local[i],
+                       #c=cmap(i),
+                        s=100,
+                       edgecolor='black')
+            else:
+                plt.scatter(x,y,
+                       #c=clrs_local[i],
+                       c=cmap(i),
+                        s=100,
+                       edgecolor='black')
+
+        #########################################################
+        ###################### BOX PLOTS ########################
+        #########################################################
+        flierprops = dict(#marker='o',
+                          #markerfacecolor='g',
+                          markersize=10000,
+                          linestyle='none',
+                          markeredgecolor='r')
+
+        #
+        data.boxplot(showfliers=False,
+                     flierprops=flierprops,
+                     grid=False)
+
+
+
+        #
+        plt.xlim(0.5, 6.5)
+        plt.ylim(-15,0)
+        plt.xticks([])
+        #plt.yticks([])
+
+        #
+        plt.plot([0,6.5], [-3,-3],'--',linewidth=3,c='grey',alpha=.5)
+        plt.plot([0,6.5], [-5,-5],'--',linewidth=3,c='grey',alpha=.5)
+        plt.plot([0,6.5],[-10,-10],'--',linewidth=3,c='grey',alpha=.5)
+
+        # ax2 = ax.twinx()  # instantiate a second axes that shares the same x-axis
+
+        patches = []
+        for p in range(1,len(my_dict),1):
+            res = stats.ks_2samp(edts[p][1], edts[0][1])
+            #print ("res: ", res)
+            label_ = ''
+            for k in range(len(pvals)):
+                if res[1]<pvals[k]:
+                    label_ = label_ + "*"
+                else:
+                    break
+
+            patches.append(mpatches.Patch(label=label_))
+
+        #plt.legend(handles=patches,fontsize=12)
+
+        return means
+
+    ############################
+    animal_ids = ['IA1','IA2','IA3','IJ1','IJ2','AQ2']
+    biorxiv_names = ['M1','M2','M3','M4','M5','M6']
+
+    licking_flag = False
+    means = []
+    plt.figure(figsize=(20,5))
+    for ctr,animal_id in enumerate(animal_ids):
+        ax=plt.subplot(1,6,ctr+1)
+
+        if ctr==0:
+            plt.ylabel("EDTs with lever pull lockouts (sec)")
+        if licking_flag==False:
+            edts = np.load(os.path.join(root_dir,
+                                        animal_id,
+                                    animal_id +
+                                    '_edts_lockedout.npy'), allow_pickle=True)
+        else:
+            edts = np.load(os.path.join(root_dir,animal_id,
+                                    animal_id +
+                                    '_edts_lockedout_licking.npy'), allow_pickle=True)
+
+
+        #
+        plt.title(biorxiv_names[ctr])
+        m_ = box_plots(edts, licking_flag)
+        means.append(m_)
+
+    #np.save('/home/cat/lever_lockout_means.npy',means)
+
+def plot_trends_lever_lockouts(root_dir):
+    biorxiv_names = ['M1','M2','M3','M4','M5','M6']
+
+    means = np.load(os.path.join(root_dir,'lever_lockout_means.npy'),allow_pickle=True)
+    fig=plt.figure()
+    t = np.array([3,6,9,12,15])
+    for k in range(6):
+        mm = means[k]#.to_numpy()
+        #print (mm)
+        plt.plot(t, mm,
+                 label=biorxiv_names[k],
+                 linewidth=5)
+        plt.scatter(t, mm,
+                   s=100)
+
+    plt.xlabel("# sec leverlpull lockout")
+    plt.ylabel("EDTs (sec)")
+    plt.plot([3,15],[-3,-3],'--',c='grey')
+    plt.plot([3,15],[-5,-5],'--',c='grey')
+
+    plt.ylim(-6.5,0)
+    plt.legend()
+
+#
+def plot_area_averages(main_dir, animal_id, session_ids):
+    # FIG 6A example of visual vs. limb averages
+    #animal_id = 'IJ2'
+    #session_ids = ['Feb1_', 'Mar2_','Mar31_','Apr4_']
+    #session_ids = ['Feb3_','Mar3_'] #,'Apr4_']
+
+    colors = plt.cm.viridis(np.linspace(0,1,3))
+    #colors=['black','blue','red','magenta']
+    #
+    plt.figure(figsize=(20,5))
+    area_ids = [13, 8, 12, 11]
+    linewidth = 3
+    plot_roi_averages(main_dir,
+                         animal_id,
+                         session_ids,
+                         colors,
+                         area_ids,
+                         linewidth)
+
+
+
+def load_raw_data(spatial_fname, temporal_fname):
+    # GRAB AND RECONSTRUCT DATA
+    spatial = np.load(spatial_fname)
+    temporal = np.load(temporal_fname)
+    temporal = temporal.transpose(0,2,1)
+
+    #
+    print (spatial.shape)
+    print (temporal.shape)
+
+    #
+    print ("reconstructing data: ")
+    data = np.matmul( temporal, spatial)
+    print (data.shape)
+
+    #
+    print ("getting mean of data: ")
+    data_mean = data.mean(0)
+    print ("data_mean: ", data_mean.shape)
+    # compute variance in raw data- not used
+    # var = np.var(data2d, axis=0)
+    # print ("var: ", var.shape)
+
+    ######################################
+    ###### COMPUTE RAW ROI ACTIVITY ######
+    ######################################
+    data2D = data_mean.reshape(data_mean.shape[0], 128,128)
+    print ("Data mean 2D: ", data2D.shape)
+
+    #
+    means = []
+    ctr=0
+    for id_ in ordered_names:
+        area_id = areas[id_]
+        idx = np.where(atlas==area_id)
+        print (ctr, "areaId: ", area_id, names[id_], idx[0].shape)
+        mask = np.zeros((128,128),'float32') + np.nan
+        mask[idx] = 1
+
+        temp = data2D*mask
+        roi = np.nanmean(temp, axis=1)
+        roi = np.nanmean(roi, axis=1)
+        means.append(roi)
+
+        ctr+=1
+
+    #
+    raw_means = np.array(means)
+    print ("Raw data means: ", raw_means.shape)
+
+    return raw_means
+
+
+def load_locaNMF_data(fname_locaNMF):
+    # order locaNMF components by plot color ORDER in Fig 4A
+    ordered_names = np.array([15,0,14,1,   # retrosplenial areas
+                              13,2,
+                              12,3,
+                              11,4,
+                              10,5,
+                              9,6,
+                              8,7])[::-1]
+
+
+    # load raw data
+    try:
+        d = np.load(fname_locaNMF)
+    except:
+        print ("file missing", fname_locaNMF)
+        return None, None, None, None, None
+
+    locaNMF_temporal = d['temporal_trial']
+    locaNMF_temporal_random = d['temporal_random']
+    locaNMF_temporal = locaNMF_temporal[:,ordered_names]
+    locaNMF_temporal_random = locaNMF_temporal_random[:,ordered_names]
+    #print ("locanmf data: ", locaNMF_temporal.shape)
+
+    #
+    areas = d['areas'][ordered_names]
+    names = d['names'][ordered_names]
+    #print ("original names: ", names.shape)
+
+    #
+    atlas = np.load('/media/cat/4TBSSD/yuki/yongxu/atlas_split.npy')
+    #print ("atlas: ",atlas.shape)
+    # print (areas)
+    # print (names)
+
+    print ("  # trials ", locaNMF_temporal.shape)
+    #print ("ORDERED NAMES: ", names[ordered_names])
+
+
+    return atlas, areas, names, locaNMF_temporal, locaNMF_temporal_random
+
+
+def plot_locanmf_vs_raw(locaNMF_temporal, raw_means):
+# FIg 2B locaNMF vs. raw
+
+    locaNMF_temporal_means_clip = np.mean(locaNMF_temporal,axis=0)[:,:900]
+    print ('locaNMF_temporal_means: ',
+            locaNMF_temporal_means_clip.shape)
+
+    #
+    raw_means_clip = raw_means[:,:900]
+    print ('raw temporal_means: ', raw_means.shape)
+
+    #
+    colors = plt.cm.jet(np.linspace(0,1,raw_means.shape[0]))
+    scale1 = 1
+    scale2 = scale4 = .075
+    scale3 = 1
+
+    #
+    t = np.arange(raw_means_clip.shape[1])/30-30
+    fig=plt.figure(figsize=(10,10))
+    linewidth=3
+    for k in range(raw_means.shape[0]):
+        ax1=plt.subplot(121)
+        plt.xticks([])
+        plt.yticks([])
+        plt.xlim(-15,0)
+        plt.ylim(-.1,1.25)
+
+        temp1 = raw_means_clip[k]#/np.max(raw_means[k])
+        if k==0:
+            plt.plot(t,temp1*scale1+k*scale2,c=colors[k],
+                     linewidth= linewidth,
+                     label = 'raw')
+        else:
+            plt.plot(t,temp1*scale1+k*scale2,c=colors[k],
+                     linewidth= linewidth)
+
+        #plt.plot([-15,0], [scale3+k*scale2, scale3+k*scale2],'--',c='black',alpha=.2)
+
+
+        # locanmf traces
+        temp2 = locaNMF_temporal_means_clip[k]#/np.max(locaNMF_temporal_means[k])
+
+        if k ==0:
+            plt.plot(t,temp2*scale3+k*scale2,'--',
+                     linewidth= linewidth,
+                     c=colors[k],
+                    label='locaNMF')
+        else:
+            plt.plot(t,temp2*scale3+k*scale2,'--',
+                     linewidth= linewidth,
+                     c=colors[k])
+
+        plt.plot([-15,0], [k*scale2,k*scale2],'--',c='black',alpha=.2)
+
+    #     #
+    #     ax2=plt.subplot(122)
+    #     plt.xlim(-15,0)
+    #     temp3 = temp2*scale3-temp1*scale1
+    #     plt.plot(t, temp3*scale3+k*scale4,'--', c=colors[k])
+
+    ax1.legend()
+    if False:
+        plt.savefig('/home/cat/fano.png',dpi=300)
+        plt.close()
+    else:
+        plt.show()
 
 
 
 
 
 
+#
+def variance_locaNMF(locaNMF_temporal):
+    #
+    t = np.arange(locaNMF_temporal.shape[2])/30 - 30
+    means = []
+    var = []
+    #for k in ordered_names:
+    for k in range(locaNMF_temporal.shape[1]):
+        temp = locaNMF_temporal[:,k].mean(0)
+        means.append(temp)
+
+        #
+        temp = np.var(locaNMF_temporal[:,k],axis=0)
+        var.append(temp)
+
+    #
+    means = np.array(means)#[:,:900]
+    var = np.array(var)#[:,:900]
+    #print (means.shape, var.shape)
+
+    return means, var
+
+
+
+def plot_longitudinal_roi_loca(n_trials, saved_names, all_means):
+    print ('n trials: ', n_trials)
+    colors = plt.cm.viridis(np.linspace(0,1,len(all_means)))
+    area_ids = [0,1,6,7,8,9,12,13]
+    time= np.arange(all_means[0].shape[1])/30-30.
+
+    #
+    ctr=1
+    min_trials = 10
+    aucs = []
+    saved = []
+    fig=plt.figure(figsize=(10,6))
+    for ctr, area_id in enumerate(area_ids):
+        ax = plt.subplot(2,4,ctr+1)
+
+        #
+        aucs.append([])
+        counter = 0
+        for t in range(len(all_means)):
+            temp = all_means[t][area_id]
+            if n_trials[t]<min_trials:
+                continue
+
+            if np.max(np.abs(temp))<0.2:
+                plt.plot(time, temp,
+                         color=colors[t],
+                        alpha=.8)
+
+                auc = np.nansum(np.abs(temp), axis=0)
+
+                aucs[ctr].append([t,auc])
+                counter+=1
+
+        print (ctr, 'area_id: ', area_id, counter)
+        #
+        #if ctr==5:
+
+        plt.xticks([])
+        plt.yticks([])
+        plt.xlim(-15,0)
+        plt.title(saved_names[area_id],fontsize=8)
+
+        # cmap = matplotlib.cm.viridis
+        #norm = matplotlib.colors.Normalize(vmin=5, vmax=10)
+
+        # cb1 = matplotlib.colorbar.ColorbarBase(ax, cmap=cmap,
+         #                               orientation='vertical')
+
+    #
+    if False:
+        plt.savefig('/home/cat/'+str(animal_id)+'_loca_longitudinal.png',dpi=300)
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_locanmf_temporal_averages(fig,
+                                   locaNMF_temporal,
+                                  clr):
+    locaNMF_temporal_means_clip = np.mean(locaNMF_temporal,axis=0)[:,:900]
+    print ('locaNMF_temporal_means: ',
+            locaNMF_temporal_means_clip.shape)
+
+    #
+    colors = plt.cm.jet(np.linspace(0,1,locaNMF_temporal_means_clip.shape[0]))
+    scale1 = 1
+    scale2 = scale4 = .075
+    scale3 = 1
+
+    #
+    t = np.arange(locaNMF_temporal_means_clip.shape[1])/30-30
+    linewidth=5
+    for k in range(locaNMF_temporal_means_clip.shape[0]):
+        #ax1=plt.subplot(121)
+        #plt.xticks([])
+        #plt.yticks([])
+        plt.xlim(-30,0)
+        #plt.ylim(-.1,1.25)
+
+        # locanmf traces
+        temp2 = locaNMF_temporal_means_clip[k]#/np.max(locaNMF_temporal_means[k])
+
+        if k ==0:
+            plt.plot(t,temp2*scale3+k*scale2,
+                     linewidth= linewidth,
+                     c=clr)
+        else:
+            plt.plot(t,temp2*scale3+k*scale2,
+                     linewidth= linewidth,
+                     c=clr)
+
+        plt.plot([-30,0], [k*scale2,k*scale2],'--',c='black',alpha=.2)
+
+
+
+##################
+def plot_variance_locaNMF(fig, var,
+                         clr):
+
+    scale1 = 1
+    scale2 = .004
+    linewidth=5
+    # scale3 = np.nan
+    t = np.arange(var.shape[1])/30-30
+
+
+    #
+    for k in range(var.shape[0]):
+        #
+        plt.xticks([])
+        #plt.yticks([])
+
+        #
+        temp = var[k]
+        temp = temp*scale1+k*scale2
+
+        # plot the variance
+        plt.plot(t, temp, c=clr,
+                linewidth=linewidth)
+
+
+        #
+        #
+        print ("temp var: ", temp.shape)
+        idx = np.argmin(temp[750:900])
+        print ("idx: ", idx)
+        print (t[idx+750], temp[idx+750])
+        plt.scatter(t[idx+750], temp[idx+750],
+                    s=1000,
+                    color=clr,
+                   alpha=.8)
+
+        # plot lines on top of plot
+        plt.plot([-30,0], [k*scale2,k*scale2],'--',c='black',alpha=.5)
+
+        #
+        mean2 = np.mean(temp.squeeze())
+        plt.plot([-30,0], [mean2,mean2],'--',c=clr,alpha=.5)
+
+    #
+    plt.xlim(-30,0)
+
+
+def load_locaNMF_temporal(animal_id, session_name, root_dir,
+                         session_id):
+
+    loca = analysis_fig4.LocaNMFClass(root_dir, animal_id, session_name)
+
+    #
+    loca.get_sessions(session_name)
+    print ("sessions: ", loca.sessions.shape)
+    print ("selected session: ", loca.sessions[session_id])
+
+    session = loca.sessions[session_id]
+
+    # load data
+    fname_locaNMF = os.path.join(root_dir, animal_id, 'tif_files',session,
+                                 session + '_locanmf.npz')
+
+
+    atlas, areas, names, locaNMF_temporal, locaNMF_temporal_random = load_locaNMF_data(fname_locaNMF)
+
+    return atlas, areas, names, locaNMF_temporal, locaNMF_temporal_random
+
+
+def plot_roi_averages(main_dir,
+                     animal_id,
+                     session_ids,
+                     colors,
+                     area_ids,
+                     linewidth):
+    ctr_session=0
+
+    for session_id in session_ids:
+        sessions = get_sessions(main_dir,
+                                         animal_id,
+                                         session_id)
+
+        loca = np.load(os.path.join(main_dir, animal_id, 'tif_files',sessions[0],
+                                    sessions[0]+'_locanmf.npz'))
+
+        trials = loca['temporal_trial']
+        random = loca['temporal_random']
+        names = loca['names']
+
+        #
+        ctr=0
+        t=np.arange(900)/30.-30
+        for area_id in area_ids:
+            plt.subplot(1,4,ctr+1)
+            plt.title(names[area_id])
+
+            plt.plot(t,trials[:43,area_id,:900].mean(0),
+                      linewidth=linewidth,
+                      color=colors[ctr_session],
+                     label='session average')
+
+            #
+            ran = random[:43,area_id,:900]
+
+
+            for p in range(ran.shape[0]):
+                idx = np.random.choice(np.arange(-300,300,1))
+                ran[p] = np.roll(ran[p], idx)
+
+            plt.plot(t,ran.mean(0),'--',
+                     linewidth=linewidth,
+                     color=colors[ctr_session],
+                     label='random average')
+
+
+            plt.ylim(-0.10, 0.10)
+            plt.xlim(-15,t[-1])
+            plt.plot([-30,0],[0,0],'--',c='grey')
+
+            if ctr==0:
+                plt.legend()
+                plt.ylabel("DFF")
+            plt.xlabel("Time (sec)")
+            ctr+=1
+        ctr_session+=1
+
+def plot_spectra_longintudinally(colors, plotting, fs, selected_areas,
+                                all_areas,
+                                all_means,
+                                all_means_random):
+    from scipy import signal
+    from scipy.signal import argrelmax
+
+    plt.figure(figsize=(20,5))
+
+    #
+    norm = False
+    ctr2=0
+    averages = []
+    for k in range(len(selected_areas)):
+        averages.append([])
+
+    spectra = np.zeros((len(all_means),len(selected_areas),451))
+    # loop over all sessions
+    for k in range(len(all_means)):
+
+        # get all traces within a session
+        all_traces = all_means[k]
+
+        #
+        all_traces_random = all_means_random[k]
+
+        temp_list = []
+        temp_list_random = []
+        pxx_list = []
+        # loop over all areas selected
+        for ctr_area, selected_area in enumerate(selected_areas):
+
+            #########################################
+            ######### PLOT INDIVIDUAL SPECGRAMS #####
+            #########################################
+            temp = all_traces[selected_area]
+            temp_random = all_traces_random[selected_area]
+            #temp = savgol_filter(temp, 7, 1)
+            temp_list.append(temp)
+            temp_list_random.append(temp_random)
+            if True: #np.max(np.abs(temp))<0.2:
+                temp = np.float64(temp)
+                temp_random = np.float64(temp_random)
+                f, Pxx_den = signal.periodogram(temp, fs)
+                f, Pxx_den_random = signal.periodogram(temp_random, fs)
+
+            if norm:
+                Pxx_den = Pxx_den/Pxx_den_random
+
+            # SHOW ONLY FIRST 451 datapoints
+            x = np.arange(0,451,1)/30.
+            Pxx_den = Pxx_den[:451]
+
+            if plotting:
+                ax = plt.subplot(1,len(selected_areas),ctr_area+1)
+                if norm == False:
+                    plt.ylim(1E-8,1E-1)
+                else:
+                    plt.ylim(1E-3,1E6)
+
+                plt.xlabel('frequency [Hz]')
+                plt.xlim(2E-2,6)
+                #ax.set_yticks([])
+                plt.semilogy()
+                plt.semilogx()
+
+                plt.plot(x,
+                     Pxx_den,
+                     linewidth=3,
+                     c= colors[ctr_area][ctr2],
+                        alpha=.5)
+            #
+            xx = argrelmax(Pxx_den, order=100)
+
+            pxx_list.append(Pxx_den)
+            averages[ctr_area].append(Pxx_den)
+
+            spectra[k,ctr_area]=Pxx_den
+
+        ctr2+=1
+
+    #########################################
+    ######### PLOT AVERAGES #################
+    #########################################
+    for ctr_area in range(len(selected_areas)):
+        y = np.median(averages[ctr_area],axis=0)
+        argmax = np.argmax(y)
+
+        if plotting:
+            ax = plt.subplot(1,len(selected_areas),ctr_area+1)
+
+            plt.plot(x,
+                 y,
+                 linewidth=3,
+                 c= 'black')
+
+            plt.plot([x[argmax], x[argmax]],[1E-8,1E5], '--',c='red')
+            #print ("max freq: ", x[argmax])
+            #
+            plt.plot([0.1, 0.1],[1E-8,1E5], '--', c='black',alpha=.5)
+            plt.plot([1, 1],[1E-8,1E5], '--',c='black',alpha=.5)
+
+            for k in range(-8,-1,1):
+                plt.plot([1E-4,20],[10**k,10**k], '--',c='black',alpha=.5)
+        plt.title("ROI: "+ str(selected_areas[ctr_area]))
+
+
+    return spectra
+
+
+def plot_box_plots(peaks):
+
+    #
+    codes = ['Retrosplenial', 'barrel', 'limb', 'visual','motor']
+    #codes = ['limb, layer 1 - right', 'limb, layer 1 - left']
+    clrs_local = ['black','blue','red','magenta', 'pink','brown']
+
+    #
+    #bin_width = 0.01
+    #bins = np.arange(0.1,2.0,bin_width)
+
+    #
+    edts = []
+    for a in range(len(peaks)):
+        good_vals = np.hstack(peaks[a])
+        edts.append(good_vals)
+#     #
+    roi_names = ['V1-L',
+     'SomF-L',
+     'M1-L',
+     'RD-L']
+    my_dict = dict(V1L = edts[0],
+                   SomFL = edts[1],
+                   M1L = edts[2],
+                   RDL = edts[3],
+#                    M5 = edts[4],
+#                    M6 = edts[5]
+                     )
+
+    data = pd.DataFrame.from_dict(my_dict, orient='index')
+    data = data.transpose()
+
+    #
+    flierprops = dict(marker='o',
+                      #markerfacecolor='g',
+                      #markersize=10000,
+                      linestyle='none',
+                      markeredgecolor='r')
+
+    #
+    data.boxplot(showfliers=False,
+                flierprops=flierprops)
+
+    # manually define a new patch
+    labels = []
+    for i,d in enumerate(data):
+        y = data[d]#+np.random.uniform(data[d].shape[0])/200.-1/400.
+        x = np.random.normal(i+1, 0.04, len(y))
+
+        #
+        colors = plt.cm.viridis(np.linspace(0,1,len(edts[i])))
+        x = np.random.normal(i+1, 0.04, len(edts[i]))
+        print (i,d, ' y shape: ', y.shape)
+        plt.scatter(x, edts[i],
+                   #c=clrs_local[i],
+                   c=colors,
+                   edgecolor='black',
+                   s=200,
+                   #alpha=np.linspace(.2, 1.0, x.shape[0])
+                   alpha=.5
+                   )
+
+        # compute correlation between time and location
+        from scipy import stats
+        # Y and Z are numpy arrays or lists of variables
+        #print (np.arange(edts[i]).shape, y.shape)
+        corr = stats.pearsonr(np.arange(y.shape[0]), y)
+        #res = scipy.stats.normaltest(edts[i])
+        print (i, "corr", corr)
+
+        #
+        patch = mpatches.Patch(color='grey', label=roi_names[i]+ ":  "+str(round(corr[0],2)))
+
+        # handles is a list, so append manual patch
+        labels.append(patch)
+
+        # plot the legend
+    plt.legend(handles=labels, loc='upper center')
 
 
 
 
+    plt.xticks([])
+    plt.yticks([])
+
+    plt.semilogy()
+    #plt.ylim(1E-1,1E1)
+
+#
+def plot_power_spectra_multi_area(root_dir, animal_id):
+
+    all_means = np.load(os.path.join(root_dir,
+                                     animal_id,
+                                     'all_means_'+animal_id+'.npy'))
+    all_means_random = np.load(os.path.join(root_dir,
+                                     animal_id,
+                                     'all_means_random_'+animal_id+'.npy'))
+
+    #
+    colors = []
+    for p in range(4):
+        colors.append(plt.cm.viridis(np.linspace(0,1,len(all_means))))
+
+    #
+    fs = 30
+    plotting=True
+    selected_areas = [11,9,1,15]
+    all_areas = np.arange(all_means[0].shape[0])
+
+    #
+    spectra = plot_spectra_longintudinally(colors,
+                                           plotting,
+                                           fs,
+                                           selected_areas,
+                                           all_areas,
+                                           all_means,
+                                           all_means_random)
+
+#
+def plot_peak_frequency_all_animals_all_sessions(root_dir, plot_power, plot_freq):
+    from sklearn.linear_model import LinearRegression
+    from scipy import stats
+
+    all_power = np.load(os.path.join(root_dir, 'all_power.npy'),allow_pickle=True)
+    all_peaks = np.load(os.path.join(root_dir, 'all_peaks.npy'),allow_pickle=True)
 
 
+    #
+    ids = [0,2,3]
+    clrs_local = ['magenta','brown','pink','lightblue','darkblue']
+
+    feats_ = ['visual','limb','motor','Retro']
+    clrs_local_ = ['brown','lightblue','magenta','pink']
+    feat_names = ['retrosplenial','visual','limb','motor']
+    #ids_ = np.array([1,2,3])
+    #
+    animal_ids = ['IA1','IA2','IA3','IJ1','IJ2','AQ2']
+    #animal_ids = ['IA1']#,'IA2','IA3','IJ1','IJ2','AQ2']
+    biorxiv_names = ["M1", "M2", "M3", "M4","M5",'M6']
+
+    #
+    fig=plt.figure(figsize=(10,10))
+    for ctr_animal, animal_id in enumerate(animal_ids):
+        if plot_power:
+            maxes = all_power[ctr_animal]
+        elif plot_freq:
+            maxes = all_peaks[ctr_animal]
+
+        ax=plt.subplot(3,2,ctr_animal+1)
+
+        ctr=0
+        for id_ in ids:
+            m = np.array(maxes[id_])
+
+            ##################################
+            ##################################
+            ##################################
+            corr = stats.pearsonr(np.arange(m.shape[0]), m)
 
 
+            model = LinearRegression()
+            y=np.array(m).reshape(-1, 1)
+            x = np.arange(y.shape[0]).reshape(-1, 1)
+            model.fit(x, y)
+
+            x2 = np.arange(0,y.shape[0],1).reshape(-1, 1)
+            y_pred = model.intercept_ + model.coef_ * x2
 
 
+            # compute correlation between time and location
+            plt.plot(x2, y_pred,
+                     #label= str(np.round(corr,2)),
+                      c=clrs_local[id_],
+                      label=feat_names[id_],
+                     linewidth=6)
 
+            ##################################
+            ##################################
+            ##################################
+            #
+            plt.scatter(np.arange(m.shape[0]), m,
+                       c=clrs_local[id_],
+                        edgecolor='black',
+                        s=100,
+                       alpha=.3)
 
+            ctr+=1
+        if ctr_animal==0:
+            plt.legend()
+        if ctr_animal>5:
+            plt.xlabel("Session ID")
+        plt.ylabel("Freq (hz)")
 
-
+        plt.title(biorxiv_names[ctr_animal])
